@@ -25,11 +25,13 @@ export class MacroService {
    */
   private async loadHistoricalAlerts() {
     try {
-      const logs = await this.prisma.macroAlertLog.findMany({
-        select: { eventId: true },
-        take: 2000,
-        orderBy: { createdAt: 'desc' },
-      });
+      const logs = await this.prisma.executeWithRetry(() =>
+        this.prisma.macroAlertLog.findMany({
+          select: { eventId: true },
+          take: 2000,
+          orderBy: { createdAt: 'desc' },
+        }),
+      );
       logs.forEach((log) => this.alertedEventIds.add(log.eventId));
       this.logger.log(`📥 Đã nạp ${this.alertedEventIds.size} sự kiện vĩ mô đã gửi từ database.`);
     } catch (e: any) {
@@ -229,23 +231,25 @@ export class MacroService {
     this.alertedEventIds.add(event.id);
 
     try {
-      await this.prisma.macroAlertLog.upsert({
-        where: { eventId: event.id },
-        update: {
-          actual: String(event.actual ?? ''),
-          forecast: event.forecast !== null && event.forecast !== undefined ? String(event.forecast) : null,
-          previous: event.previous !== null && event.previous !== undefined ? String(event.previous) : null,
-        },
-        create: {
-          eventId: event.id,
-          title: event.title,
-          country: event.country,
-          eventDate: new Date(event.date),
-          actual: String(event.actual ?? ''),
-          forecast: event.forecast !== null && event.forecast !== undefined ? String(event.forecast) : null,
-          previous: event.previous !== null && event.previous !== undefined ? String(event.previous) : null,
-        },
-      });
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.macroAlertLog.upsert({
+          where: { eventId: event.id },
+          update: {
+            actual: String(event.actual ?? ''),
+            forecast: event.forecast !== null && event.forecast !== undefined ? String(event.forecast) : null,
+            previous: event.previous !== null && event.previous !== undefined ? String(event.previous) : null,
+          },
+          create: {
+            eventId: event.id,
+            title: event.title,
+            country: event.country,
+            eventDate: new Date(event.date),
+            actual: String(event.actual ?? ''),
+            forecast: event.forecast !== null && event.forecast !== undefined ? String(event.forecast) : null,
+            previous: event.previous !== null && event.previous !== undefined ? String(event.previous) : null,
+          },
+        }),
+      );
     } catch (err: any) {
       this.logger.error(`Lỗi lưu MacroAlertLog (id=${event.id}): ${err.message}`);
     }

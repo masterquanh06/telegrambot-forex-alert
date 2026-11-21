@@ -32,23 +32,23 @@ export class PrismaService extends PrismaClient implements OnModuleInit, OnModul
   /**
    * Chạy hàm query với cơ chế tự động reconnect nếu kết nối NeonDB bị sập tạm thời
    */
-  async executeWithRetry<T>(queryFn: () => Promise<T>, maxRetries = 2): Promise<T> {
+  async executeWithRetry<T>(queryFn: () => Promise<T>, maxRetries = 3): Promise<T> {
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         return await queryFn();
       } catch (error: any) {
-        const isClosedError =
+        const isPoolOrClosedError =
           error?.message?.includes('Server has closed the connection') ||
           error?.message?.includes('Kind: Closed') ||
+          error?.message?.includes('Timed out fetching a new connection from the connection pool') ||
           error?.code === 'P1001' ||
-          error?.code === 'P1017';
+          error?.code === 'P1017' ||
+          error?.code === 'P2024';
 
-        if (isClosedError && attempt < maxRetries) {
-          this.logger.warn(`[Prisma] Kết nối NeonDB bị ngắt. Đang tự động kết nối lại (Lần ${attempt}/${maxRetries})...`);
-          try {
-            await this.$disconnect();
-          } catch (e) {}
-          await this.connectWithRetry(2, 1000);
+        if (isPoolOrClosedError && attempt < maxRetries) {
+          const errMsg = error?.code || error?.message?.slice(0, 70);
+          this.logger.warn(`[Prisma] Kết nối Database nghẽn pool/gián đoạn (${errMsg}). Đang tự động thử lại (Lần ${attempt}/${maxRetries})...`);
+          await new Promise((resolve) => setTimeout(resolve, 1500 * attempt));
         } else {
           throw error;
         }
