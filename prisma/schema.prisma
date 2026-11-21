@@ -18,6 +18,9 @@ model TelegramUser {
   xauOversoldRsi     Float    @default(30)
   bbAtrAlertEnabled  Boolean  @default(true)
   bbAtrBias          String   @default("BOTH") // "BOTH", "BUY_ONLY", "SELL_ONLY"
+  nweAlertEnabled    Boolean  @default(true)
+  smcAlertEnabled    Boolean  @default(true)
+  smcTimeframes      String[] @default(["M5", "M15", "H1", "H4"])
   createdAt          DateTime @default(now())
 
   @@map("telegram_users")
@@ -110,6 +113,20 @@ model BbAtrAlertLog {
   createdAt   DateTime @default(now())
 
   @@map("bb_atr_alert_logs")
+}
+
+model SmcAlertLog {
+  id         Int      @id @default(autoincrement())
+  symbol     String
+  timeframe  String
+  alertType  String   // "DEMAND_OB", "SUPPLY_OB", "NWE_UPPER", "NWE_LOWER", "CONFLUENCE_BUY", "CONFLUENCE_SELL"
+  price      Float
+  zoneTop    Float?
+  zoneBottom Float?
+  message    String
+  createdAt  DateTime @default(now())
+
+  @@map("smc_alert_logs")
 }
 
 

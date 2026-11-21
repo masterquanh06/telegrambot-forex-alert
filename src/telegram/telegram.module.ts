@@ -5,6 +5,7 @@ import { MacroModule } from '../macro/macro.module';
 import { GoldModule } from '../gold/gold.module';
 import { AlertModule } from '../alert/alert.module';
 import { IndicatorModule } from '../indicator/indicator.module';
+import { SmcModule } from '../smc/smc.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { IndicatorModule } from '../indicator/indicator.module';
     GoldModule,
     forwardRef(() => AlertModule),
     forwardRef(() => IndicatorModule),
+    forwardRef(() => SmcModule),
   ],
   providers: [TelegramService],
   exports: [TelegramService],

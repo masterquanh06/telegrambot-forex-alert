@@ -6,6 +6,7 @@ import { MacroService } from '../macro/macro.service';
 import { GoldService } from '../gold/gold.service';
 import { AlertService } from '../alert/alert.service';
 import { BbAtrService } from '../indicator/bb-atr.service';
+import { SmcService } from '../smc/smc.service';
 import { TelegramUser } from '@prisma/client';
 
 @Injectable()
@@ -16,6 +17,7 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
   private goldIntervalId: NodeJS.Timeout | null = null;
   private priceAlertIntervalId: NodeJS.Timeout | null = null;
   private bbAtrIntervalId: NodeJS.Timeout | null = null;
+  private smcIntervalId: NodeJS.Timeout | null = null;
 
   constructor(
     private readonly watchlistService: WatchlistService,
@@ -24,6 +26,7 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
     private readonly goldService: GoldService,
     private readonly alertService: AlertService,
     private readonly bbAtrService: BbAtrService,
+    private readonly smcService: SmcService,
   ) {}
 
   onModuleInit() {
@@ -72,6 +75,19 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
         this.logger.error(`Lỗi khởi chạy BB+ATR Monitor ban đầu: ${err.message}`);
       });
     }, 2000);
+
+    // 5. Vòng lặp theo dõi Nadaraya-Watson Envelope & SMC (Order Blocks / Demand & Supply) đa khung thời gian (mỗi 15 giây)
+    this.smcIntervalId = setInterval(() => {
+      this.smcService.checkAllSmcAlerts().catch((err) => {
+        this.logger.error(`Lỗi trong vòng lặp SMC/NWE Monitor: ${err.message}`);
+      });
+    }, 15000);
+
+    setTimeout(() => {
+      this.smcService.checkAllSmcAlerts().catch((err) => {
+        this.logger.error(`Lỗi khởi chạy SMC/NWE Monitor ban đầu: ${err.message}`);
+      });
+    }, 5000);
   }
 
   onModuleDestroy() {
@@ -90,6 +106,10 @@ export class CronService implements OnModuleInit, OnModuleDestroy {
     if (this.bbAtrIntervalId) {
       clearInterval(this.bbAtrIntervalId);
       this.bbAtrIntervalId = null;
+    }
+    if (this.smcIntervalId) {
+      clearInterval(this.smcIntervalId);
+      this.smcIntervalId = null;
     }
     this.logger.log('🛑 Cron service đã hủy tất cả background timers an toàn.');
   }
