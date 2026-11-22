@@ -83,10 +83,13 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 • Cú pháp: <code>/bbatr [MÃ]</code> (VD: <code>/bbatr xau</code>, <code>/bbatr btc</code>), <code>/bbatr on</code> / <code>/bbatr off</code>.
   <i>👉 Bot tự động quét liên tục mỗi 15 giây trên khung M5 và gửi cảnh báo NGAY LẬP TỨC khi giá chạm hoặc khớp điều kiện!</i>
 
-🌊 <b>NADARAYA-WATSON ENVELOPE & SMC (ORDER BLOCKS / DEMAND - SUPPLY):</b>
-• Dùng lệnh <code>/smc</code> (hoặc <code>/nwe</code>, <code>/ob</code>) để cấu hình bật/tắt cảnh báo & xem phân tích đa khung thời gian (M5, M15, M30, H1, H4, D1).
-• <b>Chức năng:</b> Tự động phát hiện khi giá chạm dải NWE (h=8, mult=3), chạm Hỗ trợ/Kháng cự động, chạm các khối Order Block (Vùng Cung / Vùng Cầu) và cảnh báo điểm hợp lưu siêu mạnh!
-• Cú pháp: <code>/smc</code> (menu cài đặt), <code>/smc m15</code>, <code>/smc h1</code> (xem phân tích khung), <code>/smc on</code> / <code>/smc off</code>.
+🌊 <b>CHIẾN LƯỢC NADARAYA-WATSON ENVELOPE (NWE + DYNAMIC S/R):</b>
+• Dùng lệnh <code>/nwe</code> để mở Bảng Dashboard NWE, xem dải biên Upper/Lower & Hỗ trợ/Kháng cự động.
+• Cú pháp: <code>/nwe</code> (dashboard), <code>/nwe m15</code>, <code>/nwe h1</code>, <code>/nwe on</code> / <code>/nwe off</code>.
+
+🧱 <b>CHIẾN LƯỢC SMC ORDER BLOCKS (VÙNG CUNG / CẦU):</b>
+• Dùng lệnh <code>/ob</code> (hoặc <code>/smc</code>) để mở Bảng Dashboard Order Block, theo dõi các vùng Cung (Supply) & Cầu (Demand) chưa triệt tiêu.
+• Cú pháp: <code>/ob</code> (dashboard), <code>/ob m15</code>, <code>/ob h1</code>, <code>/ob on</code> / <code>/ob off</code>.
 
 🎯 <b>CẢNH BÁO GIÁ TỨC THÌ (VÀNG, CRYPTO):</b>
 • Dùng lệnh <code>/alert MÃ GIÁ</code> (VD: <code>/alert xau 4200</code>, <code>/alert btc 83000</code>, <code>/alert eth 3500</code>)
@@ -104,7 +107,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
 📋 <b>DANH SÁCH CÁC LỆNH TÍNH NĂNG:</b>
 🔥 <code>/tier2</code> (hoặc <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
-🌊 <code>/smc</code> (hoặc <code>/nwe</code>, <code>/ob</code>) - Menu & Cảnh báo Nadaraya-Watson Envelope + Order Block (Cung/Cầu)
+🌊 <code>/nwe</code> (hoặc <code>/envelope</code>) - Bảng Dashboard Nadaraya-Watson Envelope (NWE + Cản động)
+🧱 <code>/ob</code> (hoặc <code>/smc</code>, <code>/orderblock</code>) - Bảng Dashboard SMC Order Blocks (Vùng Cung/Cầu)
 🎯 <code>/bbatr</code> (hoặc <code>/bb</code>) - Chiến lược Bollinger Bands(20) + ATR(14) khung M5
 🎯 <code>/alert MÃ GIÁ</code> - Đặt cảnh báo giá Vàng, BTC, ETH... (VD: <code>/alert xau 4200</code>)
 📋 <code>/alerts</code> - Quản lý danh sách cảnh báo giá đang hoạt động
@@ -847,69 +851,101 @@ Gõ lệnh theo cú pháp:
       }
     });
 
-    // 8. Lệnh /smc hoặc /nwe hoặc /ob - Nadaraya-Watson Envelope + SMC (Order Blocks / Demand & Supply)
-    this.bot.command(['smc', 'nwe', 'ob', 'orderblock', 'zone'], async (ctx) => {
+    // 8. Lệnh /nwe - Nadaraya-Watson Envelope (NWE) + Dynamic S/R Dashboard
+    this.bot.command(['nwe', 'envelope'], async (ctx) => {
       const chatId = ctx.chat.id.toString();
       const username = ctx.from?.username || ctx.from?.first_name;
       await this.watchlistService.registerUser(chatId, username);
       this.smcService.registerActiveChat(chatId);
 
       const text = ctx.message.text.trim();
-      const argsStr = text.replace(/^\/(smc|nwe|ob|orderblock|zone)(@\w+)?\s*/i, '').trim();
+      const argsStr = text.replace(/^\/(nwe|envelope)(@\w+)?\s*/i, '').trim();
       const parts = argsStr.split(/\s+/).filter(Boolean);
 
-      // Nếu có đối số khung thời gian (ví dụ: /smc m15, /smc h1, /smc d1)
+      // Nếu có đối số on / off: /nwe on, /nwe off
       if (parts.length > 0) {
+        const firstArg = parts[0].toLowerCase();
+        if (['on', 'bat', 'enable'].includes(firstArg)) {
+          await this.smcService.setNwe(chatId, true);
+          const { text: msgText, keyboard } = await this.renderNweDashboardView(chatId, 'M15');
+          return ctx.replyWithHTML(`🔔 <b>ĐÃ BẬT</b> cảnh báo Nadaraya-Watson Envelope!\n\n${msgText}`, keyboard);
+        }
+        if (['off', 'tat', 'disable'].includes(firstArg)) {
+          await this.smcService.setNwe(chatId, false);
+          const { text: msgText, keyboard } = await this.renderNweDashboardView(chatId, 'M15');
+          return ctx.replyWithHTML(`🔕 <b>ĐÃ TẮT</b> cảnh báo Nadaraya-Watson Envelope!\n\n${msgText}`, keyboard);
+        }
+
         const argUpper = parts[0].toUpperCase() as SmcTimeframe;
         if (this.smcService.supportedTimeframes.includes(argUpper)) {
           await ctx.sendChatAction('typing');
           try {
-            const analysis = await this.smcService.analyzeTimeframe(argUpper);
-            const msg = this.smcService.renderDashboard(analysis);
-            const keyboard = Markup.inlineKeyboard([
-              [
-                Markup.button.callback('🔄 Làm mới', `smc_view:${argUpper}`),
-                Markup.button.callback('⚙️ Cài đặt Bật/Tắt', 'smc_open_settings'),
-              ],
-              [
-                Markup.button.callback('M5', 'smc_view:M5'),
-                Markup.button.callback('M15', 'smc_view:M15'),
-                Markup.button.callback('H1', 'smc_view:H1'),
-                Markup.button.callback('H4', 'smc_view:H4'),
-              ],
-            ]);
-            return ctx.replyWithHTML(msg, keyboard);
+            const { text: msgText, keyboard } = await this.renderNweDashboardView(chatId, argUpper);
+            return ctx.replyWithHTML(msgText, keyboard);
           } catch (e: any) {
-            return ctx.replyWithHTML(`⚠️ Lỗi phân tích SMC ${argUpper}: ${e.message}`);
+            return ctx.replyWithHTML(`⚠️ Lỗi phân tích NWE ${argUpper}: ${e.message}`);
           }
-        }
-
-        // Bật/Tắt nhanh: /smc on, /smc off, /nwe on, /nwe off, /ob on, /ob off
-        if (parts[0].toLowerCase() === 'on') {
-          await this.smcService.setAllTimeframes(chatId);
-          const current = await this.smcService.getUserSettings(chatId);
-          current.nweAlertEnabled = true;
-          current.smcAlertEnabled = true;
-          const { text: stText, keyboard } = this.renderSmcSettingsMenu(current);
-          return ctx.replyWithHTML(`🔔 Đã BẬT toàn bộ cảnh báo NWE & SMC Order Blocks!\n\n${stText}`, keyboard);
-        }
-
-        if (parts[0].toLowerCase() === 'off') {
-          const current = await this.smcService.getUserSettings(chatId);
-          current.nweAlertEnabled = false;
-          current.smcAlertEnabled = false;
-          const { text: stText, keyboard } = this.renderSmcSettingsMenu(current);
-          return ctx.replyWithHTML(`🔕 Đã TẮT toàn bộ cảnh báo NWE & SMC Order Blocks!\n\n${stText}`, keyboard);
         }
       }
 
-      // Mặc định: Mở menu cài đặt & bật/tắt đa khung thời gian
-      const settings = await this.smcService.getUserSettings(chatId);
-      const { text: menuText, keyboard } = this.renderSmcSettingsMenu(settings);
-      await ctx.replyWithHTML(menuText, keyboard);
+      // Mặc định: Mở Dashboard NWE M15
+      await ctx.sendChatAction('typing');
+      try {
+        const { text: msgText, keyboard } = await this.renderNweDashboardView(chatId, 'M15');
+        return ctx.replyWithHTML(msgText, keyboard);
+      } catch (err: any) {
+        return ctx.replyWithHTML(`⚠️ Lỗi lấy dữ liệu NWE: ${err.message}`);
+      }
     });
 
-    // 8. Lệnh /tier2 hoặc /sweep - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
+    // 9. Lệnh /ob hoặc /smc - SMC Order Blocks (Demand & Supply) Dashboard
+    this.bot.command(['ob', 'smc', 'orderblock', 'zone'], async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      const username = ctx.from?.username || ctx.from?.first_name;
+      await this.watchlistService.registerUser(chatId, username);
+      this.smcService.registerActiveChat(chatId);
+
+      const text = ctx.message.text.trim();
+      const argsStr = text.replace(/^\/(ob|smc|orderblock|zone)(@\w+)?\s*/i, '').trim();
+      const parts = argsStr.split(/\s+/).filter(Boolean);
+
+      // Nếu có đối số on / off: /ob on, /ob off
+      if (parts.length > 0) {
+        const firstArg = parts[0].toLowerCase();
+        if (['on', 'bat', 'enable'].includes(firstArg)) {
+          await this.smcService.setSmc(chatId, true);
+          const { text: msgText, keyboard } = await this.renderObDashboardView(chatId, 'M15');
+          return ctx.replyWithHTML(`🔔 <b>ĐÃ BẬT</b> cảnh báo SMC Order Blocks (Vùng Cung/Cầu)!\n\n${msgText}`, keyboard);
+        }
+        if (['off', 'tat', 'disable'].includes(firstArg)) {
+          await this.smcService.setSmc(chatId, false);
+          const { text: msgText, keyboard } = await this.renderObDashboardView(chatId, 'M15');
+          return ctx.replyWithHTML(`🔕 <b>ĐÃ TẮT</b> cảnh báo SMC Order Blocks (Vùng Cung/Cầu)!\n\n${msgText}`, keyboard);
+        }
+
+        const argUpper = parts[0].toUpperCase() as SmcTimeframe;
+        if (this.smcService.supportedTimeframes.includes(argUpper)) {
+          await ctx.sendChatAction('typing');
+          try {
+            const { text: msgText, keyboard } = await this.renderObDashboardView(chatId, argUpper);
+            return ctx.replyWithHTML(msgText, keyboard);
+          } catch (e: any) {
+            return ctx.replyWithHTML(`⚠️ Lỗi phân tích Order Block ${argUpper}: ${e.message}`);
+          }
+        }
+      }
+
+      // Mặc định: Mở Dashboard OB M15
+      await ctx.sendChatAction('typing');
+      try {
+        const { text: msgText, keyboard } = await this.renderObDashboardView(chatId, 'M15');
+        return ctx.replyWithHTML(msgText, keyboard);
+      } catch (err: any) {
+        return ctx.replyWithHTML(`⚠️ Lỗi lấy dữ liệu Order Block: ${err.message}`);
+      }
+    });
+
+    // 10. Lệnh /tier2 hoặc /sweep - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
     this.bot.command(['tier2', 'sweep', 'sfp'], async (ctx) => {
       const chatId = ctx.chat.id.toString();
       const username = ctx.from?.username || ctx.from?.first_name;
@@ -943,9 +979,224 @@ Gõ lệnh theo cú pháp:
         msg,
         Markup.inlineKeyboard([
           [Markup.button.callback(isEnabled ? '🔕 Tắt Cảnh Báo Tier 2' : '🔔 Bật Cảnh Báo Tier 2', 'smc_toggle_tier2')],
-          [Markup.button.callback('⚙️ Menu Cài Đặt NWE & SMC', 'smc_open_settings')],
+          [
+            Markup.button.callback('🌊 Bảng NWE', 'nwe_view:M15'),
+            Markup.button.callback('🧱 Bảng Order Block', 'ob_view:M15'),
+          ],
         ]),
       );
+    });
+
+    // ==================== CÁC ACTIONS CHO BẢNG NWE DASHBOARD ====================
+
+    // Action: Xem / Làm mới Dashboard NWE theo khung
+    this.bot.action(/^nwe_view:([A-Za-z0-9]+)$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const tf = ctx.match[1] as SmcTimeframe;
+      await ctx.answerCbQuery(`🔄 Đang cập nhật NWE ${tf}...`);
+      try {
+        const { text, keyboard } = await this.renderNweDashboardView(chatId, tf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e: any) {
+        await ctx.answerCbQuery(`⚠️ Lỗi: ${e.message}`, { show_alert: true });
+      }
+    });
+
+    // Action: Bật/Tắt Cảnh báo Nadaraya-Watson Envelope (NWE)
+    this.bot.action(/^nwe_toggle(:([A-Za-z0-9]+))?$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const tf = (ctx.match[2] as SmcTimeframe) || 'M15';
+      const updated = await this.smcService.toggleNwe(chatId);
+      await ctx.answerCbQuery(
+        updated.nweAlertEnabled
+          ? '🌊 Đã BẬT cảnh báo Nadaraya-Watson Envelope!'
+          : '🔕 Đã TẮT cảnh báo Nadaraya-Watson Envelope!',
+      );
+      try {
+        const { text, keyboard } = await this.renderNweDashboardView(chatId, tf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Bật/Tắt khung thời gian nhận tin NWE
+    this.bot.action(/^nwe_tf:([A-Za-z0-9]+)(:([A-Za-z0-9]+))?$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const tf = ctx.match[1] as SmcTimeframe;
+      const currentViewTf = (ctx.match[3] as SmcTimeframe) || tf;
+      const updated = await this.smcService.toggleNweTimeframe(chatId, tf);
+      const isEnabled = (updated.nweTimeframes || []).includes(tf);
+      const label = this.smcService.timeframeLabels[tf] || tf;
+      await ctx.answerCbQuery(isEnabled ? `✅ Đã BẬT cảnh báo NWE ${label}` : `❌ Đã TẮT cảnh báo NWE ${label}`);
+      try {
+        const { text, keyboard } = await this.renderNweDashboardView(chatId, currentViewTf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Bật/Tắt Tier 2 từ NWE Dashboard
+    this.bot.action(/^nwe_toggle_tier2(:([A-Za-z0-9]+))?$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const currentViewTf = (ctx.match[2] as SmcTimeframe) || 'M15';
+      const updated = await this.smcService.toggleTier2(chatId);
+      await this.bbAtrService.setUserTier2Enabled(chatId, updated.tier2AlertEnabled !== false);
+      const isNowOn = updated.tier2AlertEnabled !== false;
+      await ctx.answerCbQuery(
+        isNowOn
+          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
+          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
+      );
+      try {
+        const { text, keyboard } = await this.renderNweDashboardView(chatId, currentViewTf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Hướng dẫn NWE
+    this.bot.action('nwe_help', async (ctx) => {
+      await ctx.answerCbQuery();
+      const helpText = `
+🌊 <b>HƯỚNG DẪN CHIẾN LƯỢC: NADARAYA-WATSON ENVELOPE (NWE) + DYNAMIC S/R</b>
+━━━━━━━━━━━━━━━━━━━━━
+Dải Nadaraya-Watson Envelope sử dụng thuật toán hồi quy hạt nhân phi tham số (Non-parametric Kernel Regression) với băng thông h=8, mult=3 để bám sát và phát hiện cực trị biên dao động giá.
+
+📌 <b>Nguyên lý giao dịch:</b>
+• 🔴 <b>Dải Trên (Upper Band):</b> Vùng quá mua cực hạn (Extreme Overbought). Giá chạm hoặc vượt dải trên kết hợp cản động kháng cự là tín hiệu đảo chiều giảm -> <b>Canh SELL</b>.
+• 🟢 <b>Dải Dưới (Lower Band):</b> Vùng quá bán cực hạn (Extreme Oversold). Giá chạm hoặc thủng dải dưới kết hợp cản động hỗ trợ là tín hiệu đảo chiều tăng -> <b>Canh BUY</b>.
+• 🛡 <b>Dynamic S/R:</b> Các đường hỗ trợ / kháng cự biến thiên theo cấu trúc sóng của thị trường.
+
+🔔 <b>Cảnh báo tự động:</b>
+• Bật/Tắt cảnh báo chung bằng nút bấm [🔔 Bật Cảnh Báo NWE].
+• Tự do bật/tắt từng khung thời gian (M5, M15, M30, H1, H4, D1).
+• Khung thời gian tối ưu cho XAU/USD: <b>M15 & H1</b>.
+      `.trim();
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('📊 Quay lại Bảng NWE M15', 'nwe_view:M15')],
+      ]);
+      try {
+        await ctx.editMessageText(helpText, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(helpText, keyboard);
+      }
+    });
+
+    // Action: Menu NWE
+    this.bot.action('nwe_menu', async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      await ctx.answerCbQuery();
+      try {
+        const { text, keyboard } = await this.renderNweDashboardView(chatId, 'M15');
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // ==================== CÁC ACTIONS CHO BẢNG ORDER BLOCK DASHBOARD ====================
+
+    // Action: Xem / Làm mới Dashboard OB theo khung
+    this.bot.action(/^ob_view:([A-Za-z0-9]+)$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const tf = ctx.match[1] as SmcTimeframe;
+      await ctx.answerCbQuery(`🔄 Đang cập nhật Order Block ${tf}...`);
+      try {
+        const { text, keyboard } = await this.renderObDashboardView(chatId, tf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e: any) {
+        await ctx.answerCbQuery(`⚠️ Lỗi: ${e.message}`, { show_alert: true });
+      }
+    });
+
+    // Action: Bật/Tắt Cảnh báo Order Block (SMC / Demand & Supply)
+    this.bot.action(/^ob_toggle(:([A-Za-z0-9]+))?$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const tf = (ctx.match[2] as SmcTimeframe) || 'M15';
+      const updated = await this.smcService.toggleSmc(chatId);
+      await ctx.answerCbQuery(
+        updated.smcAlertEnabled
+          ? '🧱 Đã BẬT cảnh báo Order Block (Vùng Cung/Cầu)!'
+          : '🔕 Đã TẮT cảnh báo Order Block (Vùng Cung/Cầu)!',
+      );
+      try {
+        const { text, keyboard } = await this.renderObDashboardView(chatId, tf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Bật/Tắt khung thời gian nhận tin Order Block
+    this.bot.action(/^ob_tf:([A-Za-z0-9]+)(:([A-Za-z0-9]+))?$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const tf = ctx.match[1] as SmcTimeframe;
+      const currentViewTf = (ctx.match[3] as SmcTimeframe) || tf;
+      const updated = await this.smcService.toggleSmcTimeframe(chatId, tf);
+      const isEnabled = (updated.smcTimeframes || []).includes(tf);
+      const label = this.smcService.timeframeLabels[tf] || tf;
+      await ctx.answerCbQuery(isEnabled ? `✅ Đã BẬT cảnh báo Order Block ${label}` : `❌ Đã TẮT cảnh báo Order Block ${label}`);
+      try {
+        const { text, keyboard } = await this.renderObDashboardView(chatId, currentViewTf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Bật/Tắt Tier 2 từ OB Dashboard
+    this.bot.action(/^ob_toggle_tier2(:([A-Za-z0-9]+))?$/, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const currentViewTf = (ctx.match[2] as SmcTimeframe) || 'M15';
+      const updated = await this.smcService.toggleTier2(chatId);
+      await this.bbAtrService.setUserTier2Enabled(chatId, updated.tier2AlertEnabled !== false);
+      const isNowOn = updated.tier2AlertEnabled !== false;
+      await ctx.answerCbQuery(
+        isNowOn
+          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
+          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
+      );
+      try {
+        const { text, keyboard } = await this.renderObDashboardView(chatId, currentViewTf);
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Hướng dẫn Order Block
+    this.bot.action('ob_help', async (ctx) => {
+      await ctx.answerCbQuery();
+      const helpText = `
+🧱 <b>HƯỚNG DẪN CHIẾN LƯỢC: SMC ORDER BLOCKS (CUNG & CẦU)</b>
+━━━━━━━━━━━━━━━━━━━━━
+Order Block (OB) là các vùng tích lũy lệnh lớn của tổ chức tài chính/cá mập (Smart Money) trước khi tạo ra cú dịch chuyển giá đột phá (BOS/ChoCH).
+
+📌 <b>Nguyên lý giao dịch:</b>
+• 🔴 <b>Vùng Cung (Supply Zone / Bearish OB):</b> Cây nến tăng cuối cùng trước cú xả mạnh phá vỡ cấu trúc đáy. Khi giá hồi về (Retest) vùng này -> <b>Ưu tiên Canh SELL</b>.
+• 🟢 <b>Vùng Cầu (Demand Zone / Bullish OB):</b> Cây nến giảm cuối cùng trước cú bơm mạnh phá vỡ cấu trúc đỉnh. Khi giá hồi về vùng này -> <b>Ưu tiên Canh BUY</b>.
+• ❌ <b>Triệt tiêu (Mitigation):</b> Một vùng OB khi bị giá đâm xuyên qua thân nến sẽ bị coi là đã triệt tiêu và bot sẽ tự động loại bỏ.
+
+🔥 <b>Tín hiệu VIP Tier 2 (Quét Thanh Khoản - SFP):</b>
+• Khi giá chạm vào OB mà nến đồng thời rút râu quét sạch đỉnh/đáy thanh khoản (Liquidity Sweep) -> Tín hiệu xác suất thắng cực cao!
+      `.trim();
+      const keyboard = Markup.inlineKeyboard([
+        [Markup.button.callback('📊 Quay lại Bảng Order Block M15', 'ob_view:M15')],
+      ]);
+      try {
+        await ctx.editMessageText(helpText, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(helpText, keyboard);
+      }
+    });
+
+    // Action: Menu OB
+    this.bot.action('ob_menu', async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      await ctx.answerCbQuery();
+      try {
+        const { text, keyboard } = await this.renderObDashboardView(chatId, 'M15');
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
     });
 
     // Action: Mở menu cài đặt SMC & NWE
@@ -1296,6 +1547,130 @@ ${summaryTag}
       ],
       // Hàng 6: Xem bảng giá Vàng
       [Markup.button.callback('📊 Xem bảng giá & RSI Vàng ngay', 'xau_view_overview')],
+    ]);
+
+    return { text, keyboard };
+  }
+
+  /**
+   * Tạo giao diện Dashboard chiến lược Nadaraya-Watson Envelope (NWE + Dynamic S/R)
+   */
+  private async renderNweDashboardView(
+    chatId: string,
+    timeframe: SmcTimeframe = 'M15',
+  ): Promise<{ text: string; keyboard: any }> {
+    const validTf = this.smcService.supportedTimeframes.includes(timeframe) ? timeframe : 'M15';
+    const analysis = await this.smcService.analyzeTimeframe(validTf);
+    const settings = await this.smcService.getUserSettings(chatId);
+
+    const isNweOn = settings.nweAlertEnabled;
+    const nweTfs = settings.nweTimeframes || ['M5', 'M15', 'H1', 'H4'];
+    const isTier2On = settings.tier2AlertEnabled !== false;
+
+    const text = this.smcService.renderNweDashboard(analysis, isNweOn, nweTfs, isTier2On);
+
+    const isM5 = nweTfs.includes('M5');
+    const isM15 = nweTfs.includes('M15');
+    const isM30 = nweTfs.includes('M30');
+    const isH1 = nweTfs.includes('H1');
+    const isH4 = nweTfs.includes('H4');
+    const isD1 = nweTfs.includes('D1');
+
+    const alertToggleBtnText = isNweOn
+      ? '🔕 Tắt Cảnh Báo NWE'
+      : '🔔 Bật Cảnh Báo NWE';
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Làm Mới Dữ Liệu', `nwe_view:${validTf}`),
+        Markup.button.callback(alertToggleBtnText, `nwe_toggle:${validTf}`),
+      ],
+      [
+        Markup.button.callback(validTf === 'M5' ? '✅ 🟡 M5' : '🟡 M5', 'nwe_view:M5'),
+        Markup.button.callback(validTf === 'M15' ? '✅ 🟡 M15' : '🟡 M15', 'nwe_view:M15'),
+        Markup.button.callback(validTf === 'H1' ? '✅ 🟡 H1' : '🟡 H1', 'nwe_view:H1'),
+        Markup.button.callback(validTf === 'H4' ? '✅ 🟡 H4' : '🟡 H4', 'nwe_view:H4'),
+        Markup.button.callback(validTf === 'D1' ? '✅ 🟡 D1' : '🟡 D1', 'nwe_view:D1'),
+      ],
+      [
+        Markup.button.callback(`${isM5 ? '✅' : '❌'} Báo M5`, `nwe_tf:M5:${validTf}`),
+        Markup.button.callback(`${isM15 ? '✅' : '❌'} Báo M15`, `nwe_tf:M15:${validTf}`),
+        Markup.button.callback(`${isM30 ? '✅' : '❌'} Báo M30`, `nwe_tf:M30:${validTf}`),
+      ],
+      [
+        Markup.button.callback(`${isH1 ? '✅' : '❌'} Báo H1`, `nwe_tf:H1:${validTf}`),
+        Markup.button.callback(`${isH4 ? '✅' : '❌'} Báo H4`, `nwe_tf:H4:${validTf}`),
+        Markup.button.callback(`${isD1 ? '✅' : '❌'} Báo D1`, `nwe_tf:D1:${validTf}`),
+      ],
+      [
+        Markup.button.callback(
+          isTier2On ? '🔥 Tier 2 (Quét TK): ✅ BẬT' : '🔥 Tier 2 (Quét TK): ❌ TẮT',
+          `nwe_toggle_tier2:${validTf}`,
+        ),
+        Markup.button.callback('ℹ️ Hướng Dẫn NWE', 'nwe_help'),
+      ],
+    ]);
+
+    return { text, keyboard };
+  }
+
+  /**
+   * Tạo giao diện Dashboard chiến lược SMC Order Blocks (Cung & Cầu)
+   */
+  private async renderObDashboardView(
+    chatId: string,
+    timeframe: SmcTimeframe = 'M15',
+  ): Promise<{ text: string; keyboard: any }> {
+    const validTf = this.smcService.supportedTimeframes.includes(timeframe) ? timeframe : 'M15';
+    const analysis = await this.smcService.analyzeTimeframe(validTf);
+    const settings = await this.smcService.getUserSettings(chatId);
+
+    const isObOn = settings.smcAlertEnabled;
+    const obTfs = settings.smcTimeframes || ['M5', 'M15', 'H1', 'H4'];
+    const isTier2On = settings.tier2AlertEnabled !== false;
+
+    const text = this.smcService.renderObDashboard(analysis, isObOn, obTfs, isTier2On);
+
+    const isM5 = obTfs.includes('M5');
+    const isM15 = obTfs.includes('M15');
+    const isM30 = obTfs.includes('M30');
+    const isH1 = obTfs.includes('H1');
+    const isH4 = obTfs.includes('H4');
+    const isD1 = obTfs.includes('D1');
+
+    const alertToggleBtnText = isObOn
+      ? '🔕 Tắt Cảnh Báo OB'
+      : '🔔 Bật Cảnh Báo OB';
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback('🔄 Làm Mới Dữ Liệu', `ob_view:${validTf}`),
+        Markup.button.callback(alertToggleBtnText, `ob_toggle:${validTf}`),
+      ],
+      [
+        Markup.button.callback(validTf === 'M5' ? '✅ 🟡 M5' : '🟡 M5', 'ob_view:M5'),
+        Markup.button.callback(validTf === 'M15' ? '✅ 🟡 M15' : '🟡 M15', 'ob_view:M15'),
+        Markup.button.callback(validTf === 'H1' ? '✅ 🟡 H1' : '🟡 H1', 'ob_view:H1'),
+        Markup.button.callback(validTf === 'H4' ? '✅ 🟡 H4' : '🟡 H4', 'ob_view:H4'),
+        Markup.button.callback(validTf === 'D1' ? '✅ 🟡 D1' : '🟡 D1', 'ob_view:D1'),
+      ],
+      [
+        Markup.button.callback(`${isM5 ? '✅' : '❌'} Báo M5`, `ob_tf:M5:${validTf}`),
+        Markup.button.callback(`${isM15 ? '✅' : '❌'} Báo M15`, `ob_tf:M15:${validTf}`),
+        Markup.button.callback(`${isM30 ? '✅' : '❌'} Báo M30`, `ob_tf:M30:${validTf}`),
+      ],
+      [
+        Markup.button.callback(`${isH1 ? '✅' : '❌'} Báo H1`, `ob_tf:H1:${validTf}`),
+        Markup.button.callback(`${isH4 ? '✅' : '❌'} Báo H4`, `ob_tf:H4:${validTf}`),
+        Markup.button.callback(`${isD1 ? '✅' : '❌'} Báo D1`, `ob_tf:D1:${validTf}`),
+      ],
+      [
+        Markup.button.callback(
+          isTier2On ? '🔥 Tier 2 (Quét TK): ✅ BẬT' : '🔥 Tier 2 (Quét TK): ❌ TẮT',
+          `ob_toggle_tier2:${validTf}`,
+        ),
+        Markup.button.callback('ℹ️ Hướng Dẫn OB', 'ob_help'),
+      ],
     ]);
 
     return { text, keyboard };

@@ -99,19 +99,31 @@ Chiến lược kết hợp toán học làm mượt phi tuyến tính (Kernel R
    - 🚨🟢🟢 **Hợp lưu MUA:** Giá chạm đồng thời **Dải dưới NWE** + **Vùng Cầu (Bullish OB)**.
    - 🚨🔴🔴 **Hợp lưu BÁN:** Giá chạm đồng thời **Dải trên NWE** + **Vùng Cung (Bearish OB)**.
 
-### 🎛 Menu cài đặt Bật/Tắt (Tương tự RSI)
-Gõ lệnh `/smc` để mở giao diện:
-* **Nút bấm Bật/Tắt loại tín hiệu:**
-  - `🌊 NWE: ✅ BẬT` / `❌ TẮT`
-  - `🧱 Order Block: ✅ BẬT` / `❌ TẮT`
-* **Nút bấm Bật/Tắt theo khung thời gian (Độc lập):**
-  - `M5` (5 Phút) | `M15` (15 Phút) | `M30` (30 Phút)
-  - `H1` (1 Giờ) | `H4` (4 Giờ) | `D1` (1 Ngày)
-* **Nút bấm tiện ích:**
-  - `🔔 Bật tất cả 6 khung`: Kích hoạt quét toàn bộ các khung.
-  - `🎯 Khuyên dùng (M5-H4)`: Kích hoạt bộ khung chuẩn scalping & swing.
-* **Xem trực tiếp phân tích:**
-  - `/smc m5`, `/smc m15`, `/smc h1`, `/smc h4`, `/smc d1`.
+### 🎛 Bảng Dashboard & Menu Cài Đặt Riêng Biệt (Tách biệt NWE và OB)
+
+Hệ thống đã tách riêng thành 2 bảng Dashboard độc lập, trực quan và dễ theo dõi:
+
+#### 🌊 Bảng 1: Nadaraya-Watson Envelope (`/nwe`)
+* **Lệnh mở bảng:** `/nwe` (hoặc `/envelope`)
+* **Xem theo từng khung thời gian:** `/nwe m5`, `/nwe m15`, `/nwe h1`, `/nwe h4`, `/nwe d1`
+* **Bật/Tắt nhanh cảnh báo:** `/nwe on` | `/nwe off`
+* **Giao diện nút bấm trực tiếp trên Telegram:**
+  - `🔄 Làm Mới Dữ Liệu` | `🔔 Bật / 🔕 Tắt Cảnh Báo NWE`
+  - Chọn khung xem ngay: `M5` | `M15` | `H1` | `H4` | `D1`
+  - Bật/Tắt nhận tin độc lập từng khung: `Báo M5`, `Báo M15`, `Báo M30`, `Báo H1`, `Báo H4`, `Báo D1`
+  - `🔥 Tier 2 (Quét TK): ✅ BẬT` / `❌ TẮT`
+  - `ℹ️ Hướng Dẫn NWE`
+
+#### 🧱 Bảng 2: SMC Order Blocks - Vùng Cung & Cầu (`/ob`)
+* **Lệnh mở bảng:** `/ob` (hoặc `/smc`, `/orderblock`, `/zone`)
+* **Xem theo từng khung thời gian:** `/ob m5`, `/ob m15`, `/ob h1`, `/ob h4`, `/ob d1`
+* **Bật/Tắt nhanh cảnh báo:** `/ob on` | `/ob off`
+* **Giao diện nút bấm trực tiếp trên Telegram:**
+  - `🔄 Làm Mới Dữ Liệu` | `🔔 Bật / 🔕 Tắt Cảnh Báo OB`
+  - Chọn khung xem ngay: `M5` | `M15` | `H1` | `H4` | `D1`
+  - Bật/Tắt nhận tin độc lập từng khung: `Báo M5`, `Báo M15`, `Báo M30`, `Báo H1`, `Báo H4`, `Báo D1`
+  - `🔥 Tier 2 (Quét TK): ✅ BẬT` / `❌ TẮT`
+  - `ℹ️ Hướng Dẫn OB`
 
 ---
 

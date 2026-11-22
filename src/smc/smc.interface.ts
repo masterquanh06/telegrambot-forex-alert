@@ -61,7 +61,9 @@ export interface SmcAnalysisResult {
 
 export interface UserSmcSettings {
   nweAlertEnabled: boolean;   // Bật/tắt cảnh báo Nadaraya-Watson Envelope
+  nweTimeframes: SmcTimeframe[]; // Khung thời gian bật theo dõi NWE
   smcAlertEnabled: boolean;   // Bật/tắt cảnh báo Supply/Demand & Order Block
-  timeframes: SmcTimeframe[]; // Các khung thời gian đang bật theo dõi
+  smcTimeframes: SmcTimeframe[]; // Khung thời gian bật theo dõi Order Block
+  timeframes: SmcTimeframe[]; // Khung thời gian fallback chung
   tier2AlertEnabled?: boolean; // Bật/tắt riêng cảnh báo Tier 2 (Quét thanh khoản)
 }

@@ -45,9 +45,13 @@ Hệ thống tích hợp các thuật toán phân tích kỹ thuật thời gian
 
 | Nhóm | Lệnh | Chức năng |
 | :--- | :--- | :--- |
-| **SMC & NWE** | `/smc` (hoặc `/nwe`, `/ob`) | Mở menu Bật/Tắt cảnh báo NWE & Order Blocks đa khung (`M5` đến `D1`) |
-| | `/smc m5`, `/smc m15`, `/smc h1` | Xem phân tích NWE, Dynamic S/R và các vùng Order Block gần nhất |
-| | `/smc on` / `/smc off` | Bật / Tắt nhanh toàn bộ cảnh báo NWE & SMC |
+| **NWE Envelope** | `/nwe` (hoặc `/envelope`) | Mở Dashboard riêng dải Nadaraya-Watson Envelope & Dynamic S/R |
+| | `/nwe m5`, `/nwe m15`, `/nwe h1` | Xem dải biên NWE Upper, Kernel, Lower cho từng khung |
+| | `/nwe on` / `/nwe off` | Bật / Tắt nhanh cảnh báo tự động NWE |
+| **Order Blocks (SMC)** | `/ob` (hoặc `/smc`, `/orderblock`) | Mở Dashboard riêng SMC Order Blocks (Vùng Cung - Cầu) |
+| | `/ob m5`, `/ob m15`, `/ob h1` | Xem các vùng Supply & Demand chưa triệt tiêu (Unmitigated) |
+| | `/ob on` / `/ob off` | Bật / Tắt nhanh cảnh báo tự động Order Block |
+| **Tier 2 (VIP)** | `/tier2` (hoặc `/sweep`, `/sfp`) | Bật / Tắt riêng cảnh báo Quét Thanh Khoản (High Probability) |
 | **BB + ATR (M5)** | `/bbatr` (hoặc `/bb`) | Mở bảng đo kỹ thuật M5, vùng Entry Buy/Sell, SL, TP, Bias ngày |
 | | `/bbatr on` / `/bbatr off` | Bật / Tắt nhận cảnh báo tự động XAU/USD M5 |
 | | `/bbatr bias buy` / `sell` / `both` | Lọc hướng giao dịch: Chỉ Buy, Chỉ Sell hoặc Cả 2 chiều |

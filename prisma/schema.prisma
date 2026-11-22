@@ -19,6 +19,7 @@ model TelegramUser {
   bbAtrAlertEnabled  Boolean  @default(true)
   bbAtrBias          String   @default("BOTH") // "BOTH", "BUY_ONLY", "SELL_ONLY"
   nweAlertEnabled    Boolean  @default(true)
+  nweTimeframes      String[] @default(["M5", "M15", "H1", "H4"])
   smcAlertEnabled    Boolean  @default(true)
   smcTimeframes      String[] @default(["M5", "M15", "H1", "H4"])
   tier2AlertEnabled  Boolean  @default(true)

@@ -450,6 +450,7 @@ export class SmcService {
           where: { chatId },
           select: {
             nweAlertEnabled: true,
+            nweTimeframes: true,
             smcAlertEnabled: true,
             smcTimeframes: true,
             tier2AlertEnabled: true,
@@ -458,10 +459,14 @@ export class SmcService {
       );
 
       if (user) {
+        const nweTfs = (user.nweTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'];
+        const smcTfs = (user.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'];
         const settings: UserSmcSettings = {
           nweAlertEnabled: user.nweAlertEnabled ?? true,
+          nweTimeframes: nweTfs,
           smcAlertEnabled: user.smcAlertEnabled ?? true,
-          timeframes: (user.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'],
+          smcTimeframes: smcTfs,
+          timeframes: smcTfs,
           tier2AlertEnabled: user.tier2AlertEnabled ?? true,
         };
         this.userSettingsFallback.set(chatId, settings);
@@ -473,7 +478,9 @@ export class SmcService {
 
     const defaultSettings: UserSmcSettings = {
       nweAlertEnabled: true,
+      nweTimeframes: ['M5', 'M15', 'H1', 'H4'],
       smcAlertEnabled: true,
+      smcTimeframes: ['M5', 'M15', 'H1', 'H4'],
       timeframes: ['M5', 'M15', 'H1', 'H4'],
       tier2AlertEnabled: true,
     };
@@ -542,6 +549,51 @@ export class SmcService {
   }
 
   /**
+   * Đặt trực tiếp trạng thái Bật/Tắt NWE
+   */
+  async setNwe(chatId: string, enabled: boolean): Promise<UserSmcSettings> {
+    const current = await this.getUserSettings(chatId);
+    current.nweAlertEnabled = enabled;
+    this.userSettingsFallback.set(chatId, current);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.update({
+          where: { chatId },
+          data: { nweAlertEnabled: enabled },
+        }),
+      );
+    } catch (e) {}
+
+    return current;
+  }
+
+  /**
+   * Bật/Tắt từng khung thời gian riêng cho NWE (M5, M15, M30, H1, H4, D1)
+   */
+  async toggleNweTimeframe(chatId: string, tf: SmcTimeframe): Promise<UserSmcSettings> {
+    const current = await this.getUserSettings(chatId);
+    if (!current.nweTimeframes) current.nweTimeframes = ['M5', 'M15', 'H1', 'H4'];
+    if (current.nweTimeframes.includes(tf)) {
+      current.nweTimeframes = current.nweTimeframes.filter((t) => t !== tf);
+    } else {
+      current.nweTimeframes.push(tf);
+    }
+    this.userSettingsFallback.set(chatId, current);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.update({
+          where: { chatId },
+          data: { nweTimeframes: current.nweTimeframes },
+        }),
+      );
+    } catch (e) {}
+
+    return current;
+  }
+
+  /**
    * Bật/Tắt Cảnh báo Supply/Demand & Order Block (SMC)
    */
   async toggleSmc(chatId: string): Promise<UserSmcSettings> {
@@ -554,6 +606,52 @@ export class SmcService {
         this.prisma.telegramUser.update({
           where: { chatId },
           data: { smcAlertEnabled: current.smcAlertEnabled },
+        }),
+      );
+    } catch (e) {}
+
+    return current;
+  }
+
+  /**
+   * Đặt trực tiếp trạng thái Bật/Tắt Order Block
+   */
+  async setSmc(chatId: string, enabled: boolean): Promise<UserSmcSettings> {
+    const current = await this.getUserSettings(chatId);
+    current.smcAlertEnabled = enabled;
+    this.userSettingsFallback.set(chatId, current);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.update({
+          where: { chatId },
+          data: { smcAlertEnabled: enabled },
+        }),
+      );
+    } catch (e) {}
+
+    return current;
+  }
+
+  /**
+   * Bật/Tắt từng khung thời gian riêng cho Order Block (M5, M15, M30, H1, H4, D1)
+   */
+  async toggleSmcTimeframe(chatId: string, tf: SmcTimeframe): Promise<UserSmcSettings> {
+    const current = await this.getUserSettings(chatId);
+    if (!current.smcTimeframes) current.smcTimeframes = ['M5', 'M15', 'H1', 'H4'];
+    if (current.smcTimeframes.includes(tf)) {
+      current.smcTimeframes = current.smcTimeframes.filter((t) => t !== tf);
+    } else {
+      current.smcTimeframes.push(tf);
+    }
+    current.timeframes = current.smcTimeframes;
+    this.userSettingsFallback.set(chatId, current);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.update({
+          where: { chatId },
+          data: { smcTimeframes: current.smcTimeframes },
         }),
       );
     } catch (e) {}
@@ -638,6 +736,7 @@ export class SmcService {
           select: {
             chatId: true,
             nweAlertEnabled: true,
+            nweTimeframes: true,
             smcAlertEnabled: true,
             smcTimeframes: true,
             tier2AlertEnabled: true,
@@ -649,10 +748,14 @@ export class SmcService {
 
       for (const u of users) {
         const fb = this.userSettingsFallback.get(u.chatId);
+        const nweTfs = (u.nweTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'];
+        const smcTfs = (u.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'];
         const settings: UserSmcSettings = {
           nweAlertEnabled: fb !== undefined ? fb.nweAlertEnabled : (u.nweAlertEnabled ?? true),
+          nweTimeframes: fb?.nweTimeframes || nweTfs,
           smcAlertEnabled: fb !== undefined ? fb.smcAlertEnabled : (u.smcAlertEnabled ?? true),
-          timeframes: fb !== undefined ? fb.timeframes : ((u.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4']),
+          smcTimeframes: fb?.smcTimeframes || smcTfs,
+          timeframes: fb?.smcTimeframes || smcTfs,
           tier2AlertEnabled: fb?.tier2AlertEnabled !== undefined ? fb.tier2AlertEnabled : (u.tier2AlertEnabled ?? true),
         };
         result.push({ chatId: u.chatId, settings });
@@ -749,29 +852,37 @@ export class SmcService {
               }
               // Người dùng BẬT Tier 2 -> Báo ngay lập tức (kể cả NWE, OB hay khung thời gian bị tắt)
             } else {
-              // Đối với Tier 1: Kiểm tra nếu user TẮT cả 2 loại NWE và Order Block thì TUYỆT ĐỐI BỎ QUA
-              if (!sub.settings.nweAlertEnabled && !sub.settings.smcAlertEnabled) continue;
+              const nweActive = sub.settings.nweAlertEnabled && (sub.settings.nweTimeframes || sub.settings.timeframes).includes(tf);
+              const obActive = sub.settings.smcAlertEnabled && (sub.settings.smcTimeframes || sub.settings.timeframes).includes(tf);
 
-              // Kiểm tra user có bật khung thời gian này không
-              if (!sub.settings.timeframes.includes(tf)) continue;
-
-              // Kiểm tra user có bật loại cảnh báo tương ứng không
-              const matchNwe = isNweSignal && sub.settings.nweAlertEnabled;
-              const matchOb = isObSignal && sub.settings.smcAlertEnabled;
+              const matchNwe = isNweSignal && nweActive;
+              const matchOb = isObSignal && obActive;
               if (!matchNwe && !matchOb) continue;
             }
 
-            // Với TIER 2 (HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN):
-            // Kể cả người dùng có TẮT cảnh báo NWE, Order Block hay BB, HOẶC không tick khung này -> ĐỀU BÁO!
+            // Tạo các nút điều hướng theo từng chiến lược riêng biệt
+            const alertButtons: any[] = [];
+            if (isObSignal && !isNweSignal) {
+              alertButtons.push([
+                { text: `📊 Xem Order Block ${tf}`, callback_data: `ob_view:${tf}` },
+                { text: '⚙️ Bảng Order Block', callback_data: 'ob_settings' },
+              ]);
+            } else if (isNweSignal && !isObSignal) {
+              alertButtons.push([
+                { text: `📊 Xem NWE ${tf}`, callback_data: `nwe_view:${tf}` },
+                { text: '⚙️ Bảng NWE', callback_data: 'nwe_settings' },
+              ]);
+            } else {
+              alertButtons.push([
+                { text: `🌊 Xem NWE ${tf}`, callback_data: `nwe_view:${tf}` },
+                { text: `🧱 Xem OB ${tf}`, callback_data: `ob_view:${tf}` },
+              ]);
+            }
+
             try {
               await this.telegramService.sendMessage(sub.chatId, alertMsg, {
                 reply_markup: {
-                  inline_keyboard: [
-                    [
-                      { text: `📊 Xem SMC ${tf}`, callback_data: `smc_view:${tf}` },
-                      { text: '⚙️ Cài đặt Bật/Tắt', callback_data: 'smc_open_settings' },
-                    ],
-                  ],
+                  inline_keyboard: alertButtons,
                 },
               });
               sentCount++;
@@ -811,6 +922,120 @@ export class SmcService {
     }
 
     return triggeredCount;
+  }
+
+  /**
+   * FORMAT BẢNG DASHBOARD RIÊNG CHO NADARAYA-WATSON ENVELOPE (NWE)
+   */
+  renderNweDashboard(
+    analysis: SmcAnalysisResult,
+    isNweOn: boolean,
+    nweTfs: SmcTimeframe[],
+    isTier2On = true,
+  ): string {
+    const nowStr = new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).format(new Date());
+
+    const nwe = analysis.nwe;
+    const currentPrice = analysis.currentPrice;
+    const distToUpper = nwe.upperBand - currentPrice;
+    const distToLower = currentPrice - nwe.lowerBand;
+    const distUpStr = distToUpper > 0 ? `(Cách +$${distToUpper.toFixed(2)})` : `(ĐÃ CHẠM/VƯỢT)`;
+    const distDownStr = distToLower > 0 ? `(Cách -$${distToLower.toFixed(2)})` : `(ĐÃ CHẠM/THỦNG)`;
+
+    let statusText = '⚪ VÙNG TRUNG TÍNH (Dao động an toàn bên trong dải)';
+    if (nwe.isTouchUpper) {
+      statusText = '🔴 ĐANG CHẠM DẢI TRÊN (Vùng Quá Mua / Kháng cự cực hạn)';
+    } else if (nwe.isTouchLower) {
+      statusText = '🟢 ĐANG CHẠM DẢI DƯỚI (Vùng Quá Bán / Hỗ trợ cực hạn)';
+    }
+
+    let msg = `🌊 <b>CHIẾN LƯỢC: NADARAYA-WATSON ENVELOPE (NWE + DYNAMIC S/R)</b>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `💎 <b>Tài sản:</b> <code>${analysis.displaySymbol}</code>\n`;
+    msg += `⏳ <b>Khung thời gian:</b> <b>${this.timeframeLabels[analysis.timeframe] || analysis.timeframe}</b>\n`;
+    msg += `💰 <b>Giá hiện tại:</b> <code>$${currentPrice.toFixed(2)}</code>\n`;
+    msg += `🕒 <i>Cập nhật: ${nowStr}</i>\n\n`;
+
+    msg += `📈 <b>THÔNG SỐ DẢI ENVELOPE & CẢN ĐỘNG (h=8, mult=3):</b>\n`;
+    msg += `• 🔴 <b>Dải trên (Upper Band):</b> <code>$${nwe.upperBand.toFixed(2)}</code> ${distUpStr}\n`;
+    msg += `• ⚪ <b>Kernel trung tâm:</b> <code>$${nwe.kernel.toFixed(2)}</code>\n`;
+    msg += `• 🟢 <b>Dải dưới (Lower Band):</b> <code>$${nwe.lowerBand.toFixed(2)}</code> ${distDownStr}\n`;
+    msg += `• 🛡 <b>Kháng cự động:</b> <code>$${nwe.dynamicResistance.toFixed(2)}</code>\n`;
+    msg += `• 🛡 <b>Hỗ trợ động:</b> <code>$${nwe.dynamicSupport.toFixed(2)}</code>\n\n`;
+
+    msg += `⚡ <b>Trạng thái:</b> <b>${statusText}</b>\n`;
+    msg += `🔔 <b>Cảnh báo tự động NWE:</b> <b>${isNweOn ? '🟢 ĐANG BẬT' : '⚪ ĐÃ TẮT'}</b>\n`;
+    msg += `⏳ <b>Khung nhận tin NWE (${nweTfs.length}/6 khung):</b> <code>${nweTfs.join(', ')}</code>\n`;
+    msg += `🔥 <b>Cảnh báo Tier 2 (Quét thanh khoản):</b> <b>${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao)' : '⚪ ĐÃ TẮT'}</b>\n`;
+
+    return msg;
+  }
+
+  /**
+   * FORMAT BẢNG DASHBOARD RIÊNG CHO ORDER BLOCK (SMC - CUNG & CẦU)
+   */
+  renderObDashboard(
+    analysis: SmcAnalysisResult,
+    isObOn: boolean,
+    obTfs: SmcTimeframe[],
+    isTier2On = true,
+  ): string {
+    const nowStr = new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+    }).format(new Date());
+
+    let statusText = '⚪ VÙNG TRUNG TÍNH (Chưa chạm Order Block)';
+    if (analysis.touchingSupply) {
+      statusText = `🔴 ĐÃ CHẠM VÙNG CUNG (${analysis.touchingSupply.label}) [$${analysis.touchingSupply.bottom} - $${analysis.touchingSupply.top}]`;
+    } else if (analysis.touchingDemand) {
+      statusText = `🟢 ĐÃ CHẠM VÙNG CẦU (${analysis.touchingDemand.label}) [$${analysis.touchingDemand.bottom} - $${analysis.touchingDemand.top}]`;
+    }
+
+    let msg = `🧱 <b>CHIẾN LƯỢC: SMC ORDER BLOCKS (VÙNG CUNG / CẦU)</b>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `💎 <b>Tài sản:</b> <code>${analysis.displaySymbol}</code>\n`;
+    msg += `⏳ <b>Khung thời gian:</b> <b>${this.timeframeLabels[analysis.timeframe] || analysis.timeframe}</b>\n`;
+    msg += `💰 <b>Giá hiện tại:</b> <code>$${analysis.currentPrice.toFixed(2)}</code>\n`;
+    msg += `🕒 <i>Cập nhật: ${nowStr}</i>\n\n`;
+
+    msg += `📦 <b>CÁC VÙNG CUNG - CẦU (ORDER BLOCKS) CÒN HIỆU LỰC:</b>\n`;
+    if (analysis.activeSupply.length > 0) {
+      msg += `🔴 <b>Vùng Cung (Supply Zones / Bearish OB):</b>\n`;
+      analysis.activeSupply.forEach((s) => {
+        const dist = s.bottom - analysis.currentPrice;
+        const distText = dist > 0 ? `(Cách +$${dist.toFixed(2)})` : `(ĐANG TRONG VÙNG)`;
+        msg += `  • <code>$${s.bottom.toFixed(2)} - $${s.top.toFixed(2)}</code> ${distText}\n`;
+      });
+    } else {
+      msg += `🔴 <b>Vùng Cung (Supply):</b> <i>Không có vùng cản gần</i>\n`;
+    }
+
+    if (analysis.activeDemand.length > 0) {
+      msg += `🟢 <b>Vùng Cầu (Demand Zones / Bullish OB):</b>\n`;
+      analysis.activeDemand.forEach((d) => {
+        const dist = analysis.currentPrice - d.top;
+        const distText = dist > 0 ? `(Cách -$${dist.toFixed(2)})` : `(ĐANG TRONG VÙNG)`;
+        msg += `  • <code>$${d.bottom.toFixed(2)} - $${d.top.toFixed(2)}</code> ${distText}\n`;
+      });
+    } else {
+      msg += `🟢 <b>Vùng Cầu (Demand):</b> <i>Không có vùng đỡ gần</i>\n`;
+    }
+    msg += `\n`;
+
+    msg += `⚡ <b>Trạng thái:</b> <b>${statusText}</b>\n`;
+    msg += `🔔 <b>Cảnh báo tự động Order Block:</b> <b>${isObOn ? '🟢 ĐANG BẬT' : '⚪ ĐÃ TẮT'}</b>\n`;
+    msg += `⏳ <b>Khung nhận tin Order Block (${obTfs.length}/6 khung):</b> <code>${obTfs.join(', ')}</code>\n`;
+    msg += `🔥 <b>Cảnh báo Tier 2 (Quét thanh khoản):</b> <b>${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao)' : '⚪ ĐÃ TẮT'}</b>\n`;
+
+    return msg;
   }
 
   /**
