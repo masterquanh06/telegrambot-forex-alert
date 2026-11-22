@@ -600,22 +600,33 @@ export class SmcService {
         }),
       );
 
+      const knownDbChatIds = new Set(users.map((u) => u.chatId));
+
       for (const u of users) {
+        const fb = this.userSettingsFallback.get(u.chatId);
         const settings: UserSmcSettings = {
-          nweAlertEnabled: u.nweAlertEnabled ?? true,
-          smcAlertEnabled: u.smcAlertEnabled ?? true,
-          timeframes: (u.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'],
+          nweAlertEnabled: fb !== undefined ? fb.nweAlertEnabled : (u.nweAlertEnabled ?? true),
+          smcAlertEnabled: fb !== undefined ? fb.smcAlertEnabled : (u.smcAlertEnabled ?? true),
+          timeframes: fb !== undefined ? fb.timeframes : ((u.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4']),
         };
         result.push({ chatId: u.chatId, settings });
       }
+
+      // CHỈ thêm activeChatIds nếu user đó CHƯA TỒN TẠI trong database (user mới tinh)
+      for (const chatId of this.activeChatIds) {
+        if (!knownDbChatIds.has(chatId)) {
+          const settings = await this.getUserSettings(chatId);
+          result.push({ chatId, settings });
+        }
+      }
+
+      return result;
     } catch (e) {}
 
-    // Ghép với activeChatIds fallback
+    // Fallback khi DB lỗi
     for (const chatId of this.activeChatIds) {
-      if (!result.some((r) => r.chatId === chatId)) {
-        const settings = await this.getUserSettings(chatId);
-        result.push({ chatId, settings });
-      }
+      const settings = await this.getUserSettings(chatId);
+      result.push({ chatId, settings });
     }
 
     return result;
@@ -676,6 +687,9 @@ export class SmcService {
 
           let sentCount = 0;
           for (const sub of subscribers) {
+            // Kiểm tra: nếu user TẮT cả 2 loại NWE và Order Block thì TUYỆT ĐỐI BỎ QUA
+            if (!sub.settings.nweAlertEnabled && !sub.settings.smcAlertEnabled) continue;
+
             // Kiểm tra user có bật khung thời gian này không
             if (!sub.settings.timeframes.includes(tf)) continue;
 

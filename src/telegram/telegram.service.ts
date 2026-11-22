@@ -604,12 +604,12 @@ Gõ lệnh theo cú pháp:
 
       // Trường hợp 3: Bật / Tắt cảnh báo tự động XAU M5
       if (['on', 'bat', 'enable'].includes(firstArg)) {
-        await this.bbAtrService.toggleUserBbAtrEnabled(chatId);
+        await this.bbAtrService.setUserBbAtrEnabled(chatId, true);
         const { text: msgText, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
         return ctx.replyWithHTML(`🔔 <b>ĐÃ BẬT</b> nhận cảnh báo tự động Chiến lược BB+ATR XAU/USD M5!\n\n${msgText}`, keyboard);
       }
       if (['off', 'tat', 'disable'].includes(firstArg)) {
-        await this.bbAtrService.toggleUserBbAtrEnabled(chatId);
+        await this.bbAtrService.setUserBbAtrEnabled(chatId, false);
         const { text: msgText, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
         return ctx.replyWithHTML(`🔕 <b>ĐÃ TẮT</b> nhận cảnh báo tự động Chiến lược BB+ATR XAU/USD M5.\n\n${msgText}`, keyboard);
       }
@@ -1388,6 +1388,11 @@ ${summaryTag}
     const sellBtnText = bias === 'SELL_ONLY' ? '✅ 🔴 Chỉ Sell' : '🔴 Chỉ Sell';
     const bothBtnText = bias === 'BOTH' ? '✅ ⚖️ Cả 2 chiều' : '⚖️ Cả 2 chiều';
 
+    const m5Btn = tf === 'M5' ? '✅ 🟡 M5' : '🟡 M5';
+    const m15Btn = tf === 'M15' ? '✅ 🟡 M15' : '🟡 M15';
+    const h1Btn = tf === 'H1' ? '✅ 🟡 H1' : '🟡 H1';
+    const h4Btn = tf === 'H4' ? '✅ 🟡 H4' : '🟡 H4';
+
     const keyboard = Markup.inlineKeyboard([
       [
         Markup.button.callback('🔄 Làm Mới Dữ Liệu', `bbatr_view:${state.symbol}:${tf}`),
@@ -1399,13 +1404,10 @@ ${summaryTag}
         Markup.button.callback(bothBtnText, 'bbatr_bias:BOTH'),
       ],
       [
-        Markup.button.callback('🟡 Vàng M5', 'bbatr_view:XAU:M5'),
-        Markup.button.callback('₿ Bitcoin M5', 'bbatr_view:BTC:M5'),
-        Markup.button.callback('🔷 ETH M5', 'bbatr_view:ETH:M5'),
-      ],
-      [
-        Markup.button.callback(`➕ Cài Alert Riêng (${state.symbol})`, `bbatr_add:${state.symbol}`),
-        Markup.button.callback('📋 Cảnh Báo Của Tôi', 'bbatr_list'),
+        Markup.button.callback(m5Btn, 'bbatr_view:XAU:M5'),
+        Markup.button.callback(m15Btn, 'bbatr_view:XAU:M15'),
+        Markup.button.callback(h1Btn, 'bbatr_view:XAU:H1'),
+        Markup.button.callback(h4Btn, 'bbatr_view:XAU:H4'),
       ],
       [
         Markup.button.callback('ℹ️ Hướng Dẫn Chiến Lược', 'bbatr_help'),

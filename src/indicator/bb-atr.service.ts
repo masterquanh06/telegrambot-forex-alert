@@ -992,21 +992,28 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   async toggleUserBbAtrEnabled(chatId: string): Promise<boolean> {
     const current = await this.getUserBbAtrEnabled(chatId);
     const next = !current;
-    this.userSettingFallback.set(chatId, next);
+    return this.setUserBbAtrEnabled(chatId, next);
+  }
+
+  /**
+   * Đặt trực tiếp trạng thái Bật (true) hoặc Tắt (false) nhận cảnh báo BB+ATR M5
+   */
+  async setUserBbAtrEnabled(chatId: string, enabled: boolean): Promise<boolean> {
+    this.userSettingFallback.set(chatId, enabled);
 
     try {
       await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.upsert({
           where: { chatId },
-          update: { bbAtrAlertEnabled: next },
-          create: { chatId, bbAtrAlertEnabled: next },
+          update: { bbAtrAlertEnabled: enabled },
+          create: { chatId, bbAtrAlertEnabled: enabled },
         }),
       );
     } catch (e) {
       // Fallback in-memory
     }
 
-    return next;
+    return enabled;
   }
 
   /**
@@ -1053,7 +1060,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * Lấy danh sách tất cả ChatId người dùng có bật nhận cảnh báo tự động kèm bộ lọc Bias
-   * Cơ chế phòng thủ: nếu Database nghẽn pool (P1017) thì tự động fallback về danh sách người dùng active
+   * TUYỆT ĐỐI KHÔNG GỬI NẾU NGƯỜI DÙNG ĐÃ TẮT CẢNH BÁO (bbAtrAlertEnabled = false)
    */
   async getAllUsersForGlobalAlert(): Promise<Array<{ chatId: string; bias: BbAtrBias }>> {
     try {
@@ -1064,34 +1071,47 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       );
 
       if (allUsers && allUsers.length > 0) {
-        const result = allUsers
-          .filter((u: any) => u.bbAtrAlertEnabled !== false)
-          .map((u: any) => ({
-            chatId: u.chatId,
-            bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
-              ? (u.bbAtrBias as BbAtrBias)
-              : this.userBiasFallback.get(u.chatId) || 'BOTH'),
-          }));
+        const knownDbChatIds = new Set(allUsers.map((u) => u.chatId));
+        const result: Array<{ chatId: string; bias: BbAtrBias }> = [];
 
-        // Luôn gộp thêm các chatId active trong bộ nhớ nếu chưa có trong DB
-        for (const chatId of this.activeChatIds) {
-          if (!result.some((r) => r.chatId === chatId) && this.userSettingFallback.get(chatId) !== false) {
+        for (const u of allUsers) {
+          // Trạng thái BẬT/TẮT: Kiểm tra cả Database và Fallback bộ nhớ
+          // Nếu một trong hai là false thì TUYỆT ĐỐI KHÔNG GỬI
+          const isFallbackOff = this.userSettingFallback.get(u.chatId) === false;
+          const isDbOff = u.bbAtrAlertEnabled === false;
+
+          if (!isDbOff && !isFallbackOff) {
             result.push({
-              chatId,
-              bias: this.userBiasFallback.get(chatId) || 'BOTH',
+              chatId: u.chatId,
+              bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
+                ? (u.bbAtrBias as BbAtrBias)
+                : this.userBiasFallback.get(u.chatId) || 'BOTH'),
             });
           }
         }
+
+        // CHỈ thêm activeChatIds nếu user đó CHƯA TỒN TẠI trong database (user mới tinh)
+        for (const chatId of this.activeChatIds) {
+          if (!knownDbChatIds.has(chatId)) {
+            if (this.userSettingFallback.get(chatId) === true) {
+              result.push({
+                chatId,
+                bias: this.userBiasFallback.get(chatId) || 'BOTH',
+              });
+            }
+          }
+        }
+
         return result;
       }
     } catch (e: any) {
       this.logger.warn(`Lỗi đọc DB users: ${e.message}. Đang dùng danh sách fallback active...`);
     }
 
-    // Luôn đảm bảo fallback từ danh sách các chatId từng tương tác và cấu hình trong bộ nhớ
+    // Fallback khi DB lỗi
     const fallbackList: Array<{ chatId: string; bias: BbAtrBias }> = [];
     for (const chatId of this.activeChatIds) {
-      if (this.userSettingFallback.get(chatId) !== false) {
+      if (this.userSettingFallback.get(chatId) === true) {
         fallbackList.push({
           chatId,
           bias: this.userBiasFallback.get(chatId) || 'BOTH',
