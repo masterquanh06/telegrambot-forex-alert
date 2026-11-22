@@ -31,6 +31,7 @@ export class SmcService {
       lastSignal: SmcSignalType;
       lastAlertTime: number;
       lastPrice: number;
+      lastTier?: 1 | 2;
     }
   >();
 
@@ -648,6 +649,7 @@ export class SmcService {
             const st = this.tfAlertStateMap.get(tf)!;
             if (st.lastSignal !== 'NORMAL' && now - st.lastAlertTime > 180 * 1000) {
               st.lastSignal = 'NORMAL';
+              st.lastTier = 1;
             }
           }
           continue;
@@ -658,15 +660,18 @@ export class SmcService {
           lastSignal: 'NORMAL',
           lastAlertTime: 0,
           lastPrice: 0,
+          lastTier: 1 as 1 | 2,
         };
 
+        const isUpgradeToTier2 = state.lastTier !== 2 && analysis.alertTier === 2;
         const isNewSignal = state.lastSignal !== analysis.signal;
         const isCooldownPassed = now - state.lastAlertTime > 150 * 1000; // Cooldown 2.5 phút
 
-        if (isNewSignal || isCooldownPassed) {
+        if (isUpgradeToTier2 || isNewSignal || isCooldownPassed) {
           state.lastSignal = analysis.signal;
           state.lastAlertTime = now;
           state.lastPrice = analysis.currentPrice;
+          state.lastTier = analysis.alertTier;
           this.tfAlertStateMap.set(stateKey, state);
 
           // Phát cảnh báo tới người dùng
@@ -687,31 +692,36 @@ export class SmcService {
 
           let sentCount = 0;
           for (const sub of subscribers) {
-            // Kiểm tra: nếu user TẮT cả 2 loại NWE và Order Block thì TUYỆT ĐỐI BỎ QUA
-            if (!sub.settings.nweAlertEnabled && !sub.settings.smcAlertEnabled) continue;
+            const isTier2 = analysis.alertTier === 2;
 
-            // Kiểm tra user có bật khung thời gian này không
-            if (!sub.settings.timeframes.includes(tf)) continue;
+            if (!isTier2) {
+              // Đối với Tier 1: Kiểm tra nếu user TẮT cả 2 loại NWE và Order Block thì TUYỆT ĐỐI BỎ QUA
+              if (!sub.settings.nweAlertEnabled && !sub.settings.smcAlertEnabled) continue;
 
-            // Kiểm tra user có bật loại cảnh báo tương ứng không
-            const matchNwe = isNweSignal && sub.settings.nweAlertEnabled;
-            const matchOb = isObSignal && sub.settings.smcAlertEnabled;
+              // Kiểm tra user có bật khung thời gian này không
+              if (!sub.settings.timeframes.includes(tf)) continue;
 
-            if (matchNwe || matchOb) {
-              try {
-                await this.telegramService.sendMessage(sub.chatId, alertMsg, {
-                  reply_markup: {
-                    inline_keyboard: [
-                      [
-                        { text: `📊 Xem SMC ${tf}`, callback_data: `smc_view:${tf}` },
-                        { text: '⚙️ Cài đặt Bật/Tắt', callback_data: 'smc_open_settings' },
-                      ],
-                    ],
-                  },
-                });
-                sentCount++;
-              } catch (e) {}
+              // Kiểm tra user có bật loại cảnh báo tương ứng không
+              const matchNwe = isNweSignal && sub.settings.nweAlertEnabled;
+              const matchOb = isObSignal && sub.settings.smcAlertEnabled;
+              if (!matchNwe && !matchOb) continue;
             }
+
+            // Với TIER 2 (HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN):
+            // Kể cả người dùng có TẮT cảnh báo NWE, Order Block hay BB, HOẶC không tick khung này -> ĐỀU BÁO!
+            try {
+              await this.telegramService.sendMessage(sub.chatId, alertMsg, {
+                reply_markup: {
+                  inline_keyboard: [
+                    [
+                      { text: `📊 Xem SMC ${tf}`, callback_data: `smc_view:${tf}` },
+                      { text: '⚙️ Cài đặt Bật/Tắt', callback_data: 'smc_open_settings' },
+                    ],
+                  ],
+                },
+              });
+              sentCount++;
+            } catch (e) {}
           }
 
           if (sentCount > 0) {

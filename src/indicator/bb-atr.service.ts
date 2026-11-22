@@ -86,6 +86,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   private lastGlobalSignal: BbAtrSignalType = 'NORMAL';
   private lastGlobalAlertTime = 0;
   private lastGlobalAlertPrice = 0;
+  private lastAlertTier: 1 | 2 = 1;
   private scanTickCount = 0;
 
   // Cache cấu hình người dùng phòng trường hợp DB chưa migrate cột mới
@@ -1122,6 +1123,49 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Lấy danh sách TẤT CẢ ChatId người dùng đã đăng ký bot (không phân biệt bật/tắt)
+   * DÙNG RIÊNG CHO CẢNH BÁO TIER 2 - HIGH PROBABILITY (Quét thanh khoản)
+   * Yêu cầu: Kể cả user tắt hết thông báo BB, NWE hay SMC thì Tier 2 đều được gửi đến.
+   */
+  async getAllRegisteredUsers(): Promise<Array<{ chatId: string; bias: BbAtrBias }>> {
+    const result: Array<{ chatId: string; bias: BbAtrBias }> = [];
+    const knownDbChatIds = new Set<string>();
+
+    try {
+      const allUsers = await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.findMany({
+          select: { chatId: true, bbAtrBias: true },
+        }),
+      );
+
+      if (allUsers && allUsers.length > 0) {
+        for (const u of allUsers) {
+          knownDbChatIds.add(u.chatId);
+          result.push({
+            chatId: u.chatId,
+            bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
+              ? (u.bbAtrBias as BbAtrBias)
+              : this.userBiasFallback.get(u.chatId) || 'BOTH'),
+          });
+        }
+      }
+    } catch (e: any) {
+      this.logger.warn(`Lỗi đọc DB users: ${e.message}`);
+    }
+
+    for (const chatId of this.activeChatIds) {
+      if (!knownDbChatIds.has(chatId)) {
+        result.push({
+          chatId,
+          bias: this.userBiasFallback.get(chatId) || 'BOTH',
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
    * VÒNG LẶP GLOBAL AUTO-SCANNER: Quét liên tục XAU/USD trên khung M5
    * Tự động phát hiện khi giá chạm 2 dải BB (Upper/Lower) HOẶC chạm ngưỡng Entry mở rộng (+/- 1 ATR)
    */
@@ -1156,23 +1200,55 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
             this.lastGlobalSignal = 'NORMAL';
             this.consecutiveTouchCount = 0;
             this.lastCandleAlertLevel = 'NORMAL';
+            this.lastAlertTier = 1;
           }
         }
         return false;
       }
 
+      const isSellSide =
+        state.signal === 'SELL_CONFLUENCE' ||
+        state.signal === 'ENTRY_SELL' ||
+        (state.signal as any) === 'SELL';
+      const isBuySide =
+        state.signal === 'BUY_CONFLUENCE' ||
+        state.signal === 'ENTRY_BUY' ||
+        (state.signal as any) === 'BUY';
+
+      // KIỂM TRA QUÉT THANH KHOẢN (LIQUIDITY SWEEP) KHUNG M15 CHO TÍN HIỆU M5
+      const expectedDirection = isSellSide ? 'SELL' : 'BUY';
+      let sweepSignal: SweepSignal = { hasSweep: false };
+      try {
+        const m15Data = await this.fetchCandles('XAU', 'M15', 100);
+        if (m15Data?.candles && this.liveCandles.length > 0) {
+          sweepSignal = this.liquiditySweepService.checkRecentSweep(
+            this.liveCandles,
+            m15Data.candles,
+            expectedDirection,
+            state.atrValue,
+          );
+        }
+      } catch (e: any) {
+        this.logger.debug(`Không thể quét liquidity sweep M15: ${e.message}`);
+      }
+
+      state.sweepSignal = sweepSignal;
+      state.alertTier = sweepSignal.hasSweep ? 2 : 1;
+
       // Quản lý cảnh báo theo từng nến M5:
       // 1. Nến M5 MỚI: Nếu cây nến M5 mới này tiếp tục thỏa mãn hợp lưu -> BÁO NGAY LẬP TỨC!
       // 2. CÙNG NẾN: Nếu giá bung thêm chạm Entry cực hạn (+/- 1 ATR) -> BÁO NÂNG CẤP NGAY!
-      // 3. CÙNG NẾN: Nếu duy trì ngoài dải sau 90 giây cooldown -> Báo nhắc lại để trader kịp xử lý!
+      // 3. CÙNG NẾN: Nếu xuất hiện Quét Thanh Khoản Tier 2 (High Probability) -> BÁO NÂNG CẤP NGAY!
+      // 4. CÙNG NẾN: Nếu duy trì ngoài dải sau 90 giây cooldown -> Báo nhắc lại để trader kịp xử lý!
       const candleTime = state.candleTime || Math.floor(now / (5 * 60 * 1000)) * (5 * 60 * 1000);
       const isNewCandle = candleTime > this.lastAlertCandleTime;
       const isUpgradeSignal =
         (this.lastCandleAlertLevel === 'BUY_CONFLUENCE' && state.signal === 'ENTRY_BUY') ||
         (this.lastCandleAlertLevel === 'SELL_CONFLUENCE' && state.signal === 'ENTRY_SELL');
+      const isUpgradeToTier2 = this.lastAlertTier !== 2 && state.alertTier === 2;
       const isCooldownPassed = now - this.lastGlobalAlertTime > 90 * 1000;
 
-      if (isNewCandle || isUpgradeSignal || isCooldownPassed) {
+      if (isNewCandle || isUpgradeSignal || isUpgradeToTier2 || isCooldownPassed) {
         if (isNewCandle) {
           if (this.lastGlobalSignal === state.signal) {
             this.consecutiveTouchCount++;
@@ -1187,58 +1263,37 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         this.lastGlobalSignal = state.signal;
         this.lastGlobalAlertTime = now;
         this.lastGlobalAlertPrice = state.currentPrice;
-
-        const subscribers = await this.getAllUsersForGlobalAlert();
-        if (subscribers.length === 0) {
-          this.logger.warn('⚠️ Có tín hiệu BB+ATR nhưng chưa tìm thấy người dùng nhận tin.');
-          return false;
-        }
-
-        const isSellSide =
-          state.signal === 'SELL_CONFLUENCE' ||
-          state.signal === 'ENTRY_SELL' ||
-          (state.signal as any) === 'SELL';
-        const isBuySide =
-          state.signal === 'BUY_CONFLUENCE' ||
-          state.signal === 'ENTRY_BUY' ||
-          (state.signal as any) === 'BUY';
-
-        // KIỂM TRA QUÉT THANH KHOẢN (LIQUIDITY SWEEP) KHUNG M15 CHO TÍN HIỆU M5
-        const expectedDirection = isSellSide ? 'SELL' : 'BUY';
-        let sweepSignal: SweepSignal = { hasSweep: false };
-        try {
-          const m15Data = await this.fetchCandles('XAU', 'M15', 100);
-          if (m15Data?.candles && this.liveCandles.length > 0) {
-            sweepSignal = this.liquiditySweepService.checkRecentSweep(
-              this.liveCandles,
-              m15Data.candles,
-              expectedDirection,
-              state.atrValue,
-            );
-          }
-        } catch (e: any) {
-          this.logger.debug(`Không thể quét liquidity sweep M15: ${e.message}`);
-        }
-
-        state.sweepSignal = sweepSignal;
-        state.alertTier = sweepSignal.hasSweep ? 2 : 1;
+        this.lastAlertTier = state.alertTier;
 
         if (sweepSignal.hasSweep && sweepSignal.pool?.id) {
           this.liquiditySweepService.markPoolAsSwept(sweepSignal.pool.id);
+        }
+
+        // TIER 2 (HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN):
+        // Kể cả người dùng có TẮT cảnh báo BB hay tắt NWE/SMC, VẪN BÁO CHO TẤT CẢ NGƯỜI DÙNG!
+        // TIER 1: Chỉ gửi cho người dùng có BẬT cảnh báo BB
+        const subscribers =
+          state.alertTier === 2
+            ? await this.getAllRegisteredUsers()
+            : await this.getAllUsersForGlobalAlert();
+
+        if (subscribers.length === 0) {
+          this.logger.warn('⚠️ Có tín hiệu BB+ATR nhưng chưa tìm thấy người dùng nhận tin.');
+          return false;
         }
 
         const alertMessage = this.renderAlertMessage(state, state.signal);
 
         let sentCount = 0;
         for (const sub of subscribers) {
-          // BỘ LỌC XU HƯỚNG CHÍNH TRONG NGÀY (Daily Trend Bias):
-          // Nếu user chọn BUY_ONLY -> Bỏ qua tín hiệu phía Sell
-          if (isSellSide && sub.bias === 'BUY_ONLY') {
-            continue;
-          }
-          // Nếu user chọn SELL_ONLY -> Bỏ qua tín hiệu phía Buy
-          if (isBuySide && sub.bias === 'SELL_ONLY') {
-            continue;
+          // Với Tier 1: kiểm tra bộ lọc xu hướng trong ngày (Bias)
+          if (state.alertTier === 1) {
+            if (isSellSide && sub.bias === 'BUY_ONLY') {
+              continue;
+            }
+            if (isBuySide && sub.bias === 'SELL_ONLY') {
+              continue;
+            }
           }
 
           try {
