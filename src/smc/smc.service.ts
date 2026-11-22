@@ -452,6 +452,7 @@ export class SmcService {
             nweAlertEnabled: true,
             smcAlertEnabled: true,
             smcTimeframes: true,
+            tier2AlertEnabled: true,
           },
         }),
       );
@@ -461,6 +462,7 @@ export class SmcService {
           nweAlertEnabled: user.nweAlertEnabled ?? true,
           smcAlertEnabled: user.smcAlertEnabled ?? true,
           timeframes: (user.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'],
+          tier2AlertEnabled: user.tier2AlertEnabled ?? true,
         };
         this.userSettingsFallback.set(chatId, settings);
         return settings;
@@ -473,9 +475,50 @@ export class SmcService {
       nweAlertEnabled: true,
       smcAlertEnabled: true,
       timeframes: ['M5', 'M15', 'H1', 'H4'],
+      tier2AlertEnabled: true,
     };
     this.userSettingsFallback.set(chatId, defaultSettings);
     return defaultSettings;
+  }
+
+  /**
+   * Bật/Tắt Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
+   */
+  async toggleTier2(chatId: string): Promise<UserSmcSettings> {
+    const current = await this.getUserSettings(chatId);
+    current.tier2AlertEnabled = current.tier2AlertEnabled === false ? true : false;
+    this.userSettingsFallback.set(chatId, current);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.update({
+          where: { chatId },
+          data: { tier2AlertEnabled: current.tier2AlertEnabled },
+        }),
+      );
+    } catch (e) {}
+
+    return current;
+  }
+
+  /**
+   * Đặt trực tiếp trạng thái Bật/Tắt Cảnh báo Tier 2
+   */
+  async setTier2(chatId: string, enabled: boolean): Promise<UserSmcSettings> {
+    const current = await this.getUserSettings(chatId);
+    current.tier2AlertEnabled = enabled;
+    this.userSettingsFallback.set(chatId, current);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.update({
+          where: { chatId },
+          data: { tier2AlertEnabled: enabled },
+        }),
+      );
+    } catch (e) {}
+
+    return current;
   }
 
   /**
@@ -597,6 +640,7 @@ export class SmcService {
             nweAlertEnabled: true,
             smcAlertEnabled: true,
             smcTimeframes: true,
+            tier2AlertEnabled: true,
           },
         }),
       );
@@ -609,6 +653,7 @@ export class SmcService {
           nweAlertEnabled: fb !== undefined ? fb.nweAlertEnabled : (u.nweAlertEnabled ?? true),
           smcAlertEnabled: fb !== undefined ? fb.smcAlertEnabled : (u.smcAlertEnabled ?? true),
           timeframes: fb !== undefined ? fb.timeframes : ((u.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4']),
+          tier2AlertEnabled: fb?.tier2AlertEnabled !== undefined ? fb.tier2AlertEnabled : (u.tier2AlertEnabled ?? true),
         };
         result.push({ chatId: u.chatId, settings });
       }
@@ -694,7 +739,16 @@ export class SmcService {
           for (const sub of subscribers) {
             const isTier2 = analysis.alertTier === 2;
 
-            if (!isTier2) {
+            if (isTier2) {
+              // TIER 2 (HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN):
+              // Người dùng có cài đặt Bật/Tắt RIÊNG cho Tier 2:
+              const isTier2On = sub.settings.tier2AlertEnabled !== false;
+              if (!isTier2On) {
+                // Người dùng đã chủ động TẮT riêng cảnh báo Tier 2 -> Bỏ qua
+                continue;
+              }
+              // Người dùng BẬT Tier 2 -> Báo ngay lập tức (kể cả NWE, OB hay khung thời gian bị tắt)
+            } else {
               // Đối với Tier 1: Kiểm tra nếu user TẮT cả 2 loại NWE và Order Block thì TUYỆT ĐỐI BỎ QUA
               if (!sub.settings.nweAlertEnabled && !sub.settings.smcAlertEnabled) continue;
 

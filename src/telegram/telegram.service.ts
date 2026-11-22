@@ -103,6 +103,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   <i>👉 Bot tự động phát hiện số liệu công bố Actual + Forecast + Previous và báo NGAY LẬP TỨC qua Telegram!</i>
 
 📋 <b>DANH SÁCH CÁC LỆNH TÍNH NĂNG:</b>
+🔥 <code>/tier2</code> (hoặc <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
 🌊 <code>/smc</code> (hoặc <code>/nwe</code>, <code>/ob</code>) - Menu & Cảnh báo Nadaraya-Watson Envelope + Order Block (Cung/Cầu)
 🎯 <code>/bbatr</code> (hoặc <code>/bb</code>) - Chiến lược Bollinger Bands(20) + ATR(14) khung M5
 🎯 <code>/alert MÃ GIÁ</code> - Đặt cảnh báo giá Vàng, BTC, ETH... (VD: <code>/alert xau 4200</code>)
@@ -723,6 +724,25 @@ Gõ lệnh theo cú pháp:
       }
     });
 
+    // Action: Bật/Tắt Cảnh báo Tier 2 từ BB Dashboard
+    this.bot.action('bbatr_toggle_tier2', async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const isNowOn = await this.bbAtrService.toggleUserTier2Enabled(chatId);
+      await this.smcService.setTier2(chatId, isNowOn);
+      await ctx.answerCbQuery(
+        isNowOn
+          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
+          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
+      );
+      const { text, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(text, keyboard);
+      }
+    });
+
     // Action: Xem danh sách cảnh báo cá nhân
     this.bot.action('bbatr_list', async (ctx) => {
       const chatId = ctx.chat?.id.toString();
@@ -889,6 +909,45 @@ Gõ lệnh theo cú pháp:
       await ctx.replyWithHTML(menuText, keyboard);
     });
 
+    // 8. Lệnh /tier2 hoặc /sweep - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
+    this.bot.command(['tier2', 'sweep', 'sfp'], async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      const username = ctx.from?.username || ctx.from?.first_name;
+      await this.watchlistService.registerUser(chatId, username);
+
+      const text = ctx.message.text.trim();
+      const parts = text.split(/\s+/).filter(Boolean);
+      const arg = (parts[1] || '').toLowerCase();
+
+      let isEnabled: boolean;
+      if (['on', 'bat', 'enable'].includes(arg)) {
+        isEnabled = true;
+      } else if (['off', 'tat', 'disable'].includes(arg)) {
+        isEnabled = false;
+      } else {
+        const current = await this.smcService.getUserSettings(chatId);
+        isEnabled = current.tier2AlertEnabled === false;
+      }
+
+      await this.smcService.setTier2(chatId, isEnabled);
+      await this.bbAtrService.setUserTier2Enabled(chatId, isEnabled);
+
+      const statusBadge = isEnabled ? '🟢 ĐANG BẬT (Ưu tiên phát cảnh báo)' : '⚪ ĐÃ TẮT';
+      const msg =
+        `🔥 <b>CÀI ĐẶT CẢNH BÁO TIER 2 (QUÉT THANH KHOẢN - SFP):</b> <b>${statusBadge}</b>\n\n` +
+        (isEnabled
+          ? '<i>👉 Khi xuất hiện cú quét râu thanh khoản M15 hợp lưu cùng BB+ATR hoặc NWE+SMC, bot sẽ NGAY LẬP TỨC gửi cảnh báo Tier 2 cho bạn (kể cả khi bạn tắt cảnh báo thông thường)!</i>'
+          : '<i>👉 Bạn đã chủ động TẮT cảnh báo Tier 2. Bot sẽ không gửi tín hiệu quét thanh khoản cho bạn nữa.</i>');
+
+      return ctx.replyWithHTML(
+        msg,
+        Markup.inlineKeyboard([
+          [Markup.button.callback(isEnabled ? '🔕 Tắt Cảnh Báo Tier 2' : '🔔 Bật Cảnh Báo Tier 2', 'smc_toggle_tier2')],
+          [Markup.button.callback('⚙️ Menu Cài Đặt NWE & SMC', 'smc_open_settings')],
+        ]),
+      );
+    });
+
     // Action: Mở menu cài đặt SMC & NWE
     this.bot.action('smc_open_settings', async (ctx) => {
       const chatId = ctx.chat?.id.toString();
@@ -928,6 +987,24 @@ Gõ lệnh theo cú pháp:
         updated.smcAlertEnabled
           ? '🧱 Đã BẬT cảnh báo Order Block (Vùng Cung/Cầu)!'
           : '🔕 Đã TẮT cảnh báo Order Block (Vùng Cung/Cầu)!',
+      );
+      const { text, keyboard } = this.renderSmcSettingsMenu(updated);
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {}
+    });
+
+    // Action: Bật/Tắt Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
+    this.bot.action('smc_toggle_tier2', async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const updated = await this.smcService.toggleTier2(chatId);
+      await this.bbAtrService.setUserTier2Enabled(chatId, updated.tier2AlertEnabled !== false);
+      const isNowOn = updated.tier2AlertEnabled !== false;
+      await ctx.answerCbQuery(
+        isNowOn
+          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
+          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
       );
       const { text, keyboard } = this.renderSmcSettingsMenu(updated);
       try {
@@ -1230,6 +1307,7 @@ ${summaryTag}
   private renderSmcSettingsMenu(settings: UserSmcSettings) {
     const isNweOn = settings.nweAlertEnabled;
     const isSmcOn = settings.smcAlertEnabled;
+    const isTier2On = settings.tier2AlertEnabled !== false;
     const tfs = settings.timeframes;
 
     const isM5 = tfs.includes('M5');
@@ -1245,7 +1323,8 @@ ${summaryTag}
 
     text += `🔔 <b>Trạng thái các loại cảnh báo:</b>\n`;
     text += `• 🌊 Nadaraya-Watson Envelope (NWE): ${isNweOn ? '🟢 ĐANG BẬT' : '⚪ ĐANG TẮT'}\n`;
-    text += `• 🧱 Order Block (Demand/Supply - Cung/Cầu): ${isSmcOn ? '🟢 ĐANG BẬT' : '⚪ ĐANG TẮT'}\n\n`;
+    text += `• 🧱 Order Block (Demand/Supply - Cung/Cầu): ${isSmcOn ? '🟢 ĐANG BẬT' : '⚪ ĐANG TẮT'}\n`;
+    text += `• 🔥 Quét Thanh Khoản (Tier 2 VIP): ${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao nhất)' : '⚪ ĐÃ TẮT'}\n\n`;
 
     text += `⏳ <b>Các khung thời gian đang kích hoạt (${tfs.length}/6 khung):</b>\n`;
     text += `• M5 (5 Phút): ${isM5 ? '🟢 Bật' : '⚪ Tắt'}\n`;
@@ -1258,15 +1337,19 @@ ${summaryTag}
     text += `💡 <i>Bấm vào các nút bên dưới để Bật/Tắt loại cảnh báo hoặc từng khung thời gian:</i>`;
 
     const keyboard = Markup.inlineKeyboard([
-      // Hàng 1: Nút Bật/Tắt 2 loại cảnh báo
+      // Hàng 1: Nút Bật/Tắt 3 loại cảnh báo
       [
         Markup.button.callback(
           isNweOn ? '🌊 NWE: ✅ BẬT' : '🌊 NWE: ❌ TẮT',
           'smc_toggle_nwe',
         ),
         Markup.button.callback(
-          isSmcOn ? '🧱 Order Block: ✅ BẬT' : '🧱 Order Block: ❌ TẮT',
+          isSmcOn ? '🧱 OB: ✅ BẬT' : '🧱 OB: ❌ TẮT',
           'smc_toggle_ob',
+        ),
+        Markup.button.callback(
+          isTier2On ? '🔥 Tier 2: ✅ BẬT' : '🔥 Tier 2: ❌ TẮT',
+          'smc_toggle_tier2',
         ),
       ],
       // Hàng 2: Khung ngắn hạn
@@ -1375,8 +1458,9 @@ ${summaryTag}
     const state = await this.bbAtrService.getBbAtrState(symbol, tf);
     const isAlertEnabled = await this.bbAtrService.getUserBbAtrEnabled(chatId);
     const bias = await this.bbAtrService.getUserBias(chatId);
+    const isTier2Enabled = await this.bbAtrService.getUserTier2Enabled(chatId);
 
-    const text = this.bbAtrService.renderDashboardMessage(state, isAlertEnabled, bias);
+    const text = this.bbAtrService.renderDashboardMessage(state, isAlertEnabled, bias, isTier2Enabled);
 
     const isGold = state.assetType === 'GOLD';
     const alertToggleBtnText = isAlertEnabled
@@ -1410,7 +1494,11 @@ ${summaryTag}
         Markup.button.callback(h4Btn, 'bbatr_view:XAU:H4'),
       ],
       [
-        Markup.button.callback('ℹ️ Hướng Dẫn Chiến Lược', 'bbatr_help'),
+        Markup.button.callback(
+          isTier2Enabled ? '🔥 Tier 2 (Quét TK): ✅ BẬT' : '🔥 Tier 2 (Quét TK): ❌ TẮT',
+          'bbatr_toggle_tier2',
+        ),
+        Markup.button.callback('ℹ️ Hướng Dẫn', 'bbatr_help'),
       ],
     ]);
 

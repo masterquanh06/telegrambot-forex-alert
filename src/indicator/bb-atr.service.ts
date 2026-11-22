@@ -91,6 +91,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
   // Cache cấu hình người dùng phòng trường hợp DB chưa migrate cột mới
   private readonly userSettingFallback = new Map<string, boolean>();
+  private readonly userTier2Fallback = new Map<string, boolean>();
   private readonly userBiasFallback = new Map<string, BbAtrBias>();
   private readonly activeChatIds = new Set<string>(['5513976350']);
 
@@ -1018,6 +1019,53 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Lấy trạng thái Bật/Tắt riêng của Cảnh báo Tier 2 (Quét thanh khoản)
+   */
+  async getUserTier2Enabled(chatId: string): Promise<boolean> {
+    try {
+      const user = await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.findUnique({
+          where: { chatId },
+          select: { tier2AlertEnabled: true },
+        }),
+      );
+      if (user && typeof user.tier2AlertEnabled === 'boolean') {
+        return user.tier2AlertEnabled;
+      }
+    } catch (e) {}
+
+    return this.userTier2Fallback.get(chatId) ?? true;
+  }
+
+  /**
+   * Bật/Tắt riêng Cảnh báo Tier 2 (Quét thanh khoản High Probability)
+   */
+  async toggleUserTier2Enabled(chatId: string): Promise<boolean> {
+    const current = await this.getUserTier2Enabled(chatId);
+    const next = !current;
+    return this.setUserTier2Enabled(chatId, next);
+  }
+
+  /**
+   * Đặt trực tiếp trạng thái Bật (true) hoặc Tắt (false) nhận cảnh báo Tier 2
+   */
+  async setUserTier2Enabled(chatId: string, enabled: boolean): Promise<boolean> {
+    this.userTier2Fallback.set(chatId, enabled);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.upsert({
+          where: { chatId },
+          update: { tier2AlertEnabled: enabled },
+          create: { chatId, tier2AlertEnabled: enabled },
+        }),
+      );
+    } catch (e) {}
+
+    return enabled;
+  }
+
+  /**
    * Lấy cấu hình bộ lọc xu hướng trong ngày của User (BOTH, BUY_ONLY, SELL_ONLY)
    */
   async getUserBias(chatId: string): Promise<BbAtrBias> {
@@ -1123,30 +1171,35 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Lấy danh sách TẤT CẢ ChatId người dùng đã đăng ký bot (không phân biệt bật/tắt)
-   * DÙNG RIÊNG CHO CẢNH BÁO TIER 2 - HIGH PROBABILITY (Quét thanh khoản)
-   * Yêu cầu: Kể cả user tắt hết thông báo BB, NWE hay SMC thì Tier 2 đều được gửi đến.
+   * Lấy danh sách ChatId người dùng có BẬT Cảnh báo Tier 2 - High Probability
+   * Yêu cầu: Kể cả user tắt cảnh báo BB, NWE hay SMC, chỉ cần user không tắt riêng Tier 2 thì vẫn gửi đến!
    */
-  async getAllRegisteredUsers(): Promise<Array<{ chatId: string; bias: BbAtrBias }>> {
+  async getAllRegisteredUsersForTier2(): Promise<Array<{ chatId: string; bias: BbAtrBias }>> {
     const result: Array<{ chatId: string; bias: BbAtrBias }> = [];
     const knownDbChatIds = new Set<string>();
 
     try {
       const allUsers = await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.findMany({
-          select: { chatId: true, bbAtrBias: true },
+          select: { chatId: true, bbAtrBias: true, tier2AlertEnabled: true },
         }),
       );
 
       if (allUsers && allUsers.length > 0) {
         for (const u of allUsers) {
           knownDbChatIds.add(u.chatId);
-          result.push({
-            chatId: u.chatId,
-            bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
-              ? (u.bbAtrBias as BbAtrBias)
-              : this.userBiasFallback.get(u.chatId) || 'BOTH'),
-          });
+          const isFallbackOff = this.userTier2Fallback.get(u.chatId) === false;
+          const isDbOff = u.tier2AlertEnabled === false;
+
+          // Nếu user chủ động tắt riêng Tier 2 thì loại trừ
+          if (!isDbOff && !isFallbackOff) {
+            result.push({
+              chatId: u.chatId,
+              bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
+                ? (u.bbAtrBias as BbAtrBias)
+                : this.userBiasFallback.get(u.chatId) || 'BOTH'),
+            });
+          }
         }
       }
     } catch (e: any) {
@@ -1155,10 +1208,12 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
     for (const chatId of this.activeChatIds) {
       if (!knownDbChatIds.has(chatId)) {
-        result.push({
-          chatId,
-          bias: this.userBiasFallback.get(chatId) || 'BOTH',
-        });
+        if (this.userTier2Fallback.get(chatId) !== false) {
+          result.push({
+            chatId,
+            bias: this.userBiasFallback.get(chatId) || 'BOTH',
+          });
+        }
       }
     }
 
@@ -1270,11 +1325,12 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         }
 
         // TIER 2 (HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN):
-        // Kể cả người dùng có TẮT cảnh báo BB hay tắt NWE/SMC, VẪN BÁO CHO TẤT CẢ NGƯỜI DÙNG!
+        // Nếu user BẬT Tier 2 -> Báo cho user (kể cả user tắt cảnh báo BB hay tắt NWE/SMC)!
+        // Nếu user TẮT riêng Tier 2 -> Không gửi cho user đó.
         // TIER 1: Chỉ gửi cho người dùng có BẬT cảnh báo BB
         const subscribers =
           state.alertTier === 2
-            ? await this.getAllRegisteredUsers()
+            ? await this.getAllRegisteredUsersForTier2()
             : await this.getAllUsersForGlobalAlert();
 
         if (subscribers.length === 0) {
@@ -1780,7 +1836,12 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   /**
    * Format tin nhắn bảng Dashboard xem thông số trực quan BB+ATR
    */
-  renderDashboardMessage(state: BbAtrState, isAlertEnabled: boolean, bias: BbAtrBias = 'BOTH'): string {
+  renderDashboardMessage(
+    state: BbAtrState,
+    isAlertEnabled: boolean,
+    bias: BbAtrBias = 'BOTH',
+    isTier2Enabled = true,
+  ): string {
     const isGold = state.assetType === 'GOLD';
     const alertStatusText = isAlertEnabled ? '🟢 ĐANG BẬT (Tự động nhận tin)' : '⚪ ĐÃ TẮT';
 
@@ -1849,6 +1910,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     msg += `🧭 <b>Lọc xu hướng ngày (Bias):</b> <b>${biasText}</b>\n`;
     if (isGold) {
       msg += `🔔 <b>Cảnh báo tự động XAU M5:</b> <b>${alertStatusText}</b>\n`;
+      msg += `🔥 <b>Cảnh báo Tier 2 (Quét thanh khoản):</b> <b>${isTier2Enabled ? '🟢 ĐANG BẬT (Ưu tiên cao)' : '⚪ ĐÃ TẮT'}</b>\n`;
     }
 
     return msg;

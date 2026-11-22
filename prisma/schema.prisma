@@ -21,6 +21,7 @@ model TelegramUser {
   nweAlertEnabled    Boolean  @default(true)
   smcAlertEnabled    Boolean  @default(true)
   smcTimeframes      String[] @default(["M5", "M15", "H1", "H4"])
+  tier2AlertEnabled  Boolean  @default(true)
   createdAt          DateTime @default(now())
 
   @@map("telegram_users")
