@@ -62,10 +62,12 @@ Chiến lược bám sát hành vi kiệt sức của giá tại biên dao độ
   - **TP1:** Đường trục giữa Bollinger Bands Middle ($SMA(20)$).
   - **TP2:** Tỷ lệ R:R chuẩn $1:2$ so với khoảng cách SL.
 
-### 🎯 Điều kiện nến phát tín hiệu cảnh báo
+### 🎯 Điều kiện nến phát tín hiệu cảnh báo (Phân cấp Tiers)
 * **Khung thời gian:** 5 Phút (M5).
-* **Tín hiệu BUY:** Giá nến M5 chạm/thủng dải Bands Lower **ĐỒNG THỜI** $RSI \le 30$.
-* **Tín hiệu SELL:** Giá nến M5 chạm/vượt dải Bands Upper **ĐỒNG THỜI** $RSI \ge 70$.
+* 🔔 **Cảnh báo Chạm Dải BB thường:** Giá nến M5 chạm dải Bands(20) Upper hoặc Bands(20) Lower (thông báo theo dõi chuẩn).
+* 🔥 **Tier 1 (1 Đốm Lửa):** Giá chạm vùng Entry mở rộng `Bands(20) Upper + ATR(14)` (Bán) hoặc `Bands(20) Lower - ATR(14)` (Mua).
+* 🔥🔥 **Tier 2 (2 Đốm Lửa):** Giá chạm vùng Entry BB+ATR **ĐỒNG THỜI** $RSI \ge 70$ (Quá Mua) hoặc $RSI \le 30$ (Quá Bán).
+* 🔥🔥🔥 **Tier 3 (3 Đốm Lửa - VIP):** Tín hiệu xác suất cực cao khi có thêm **Quét Thanh Khoản Thật (True Liquidity Sweep / SFP)** khung M15 rút râu nến đảo chiều.
 
 ### ⌨️ Các lệnh điều khiển
 * `/bbatr` hoặc `/bb`: Mở dashboard chiến lược khung M5.
@@ -127,17 +129,30 @@ Hệ thống đã tách riêng thành 2 bảng Dashboard độc lập, trực qu
 
 ---
 
-## 4. Hệ thống Phân cấp Cảnh báo: Tier 1 vs Tier 2 (Quét Thanh Khoản)
+## 4. Hệ thống Phân cấp Cảnh báo: TIER 1, TIER 2, TIER 3 (Quét Thanh Khoản)
 
-Hệ thống tự động phân loại tất cả các tín hiệu vào lệnh thành 2 cấp độ cảnh báo rõ rệt:
+Hệ thống tự động phân loại tất cả các tín hiệu vào lệnh thành các cấp độ cảnh báo rõ rệt:
 
-### 🔹 Tier 1: Tín hiệu Tiêu chuẩn (Standard Confluence)
-* Khớp đầy đủ các điều kiện kỹ thuật gốc của chiến lược:
-  - **BB + ATR (M5):** Giá chạm dải Bands Upper/Lower kết hợp $RSI \ge 70$ hoặc $RSI \le 30$.
-  - **NWE + SMC:** Giá chạm dải NWE hoặc vùng Order Block (Demand / Supply).
-* Format cảnh báo chuẩn, cung cấp đầy đủ thông số Entry, SL, TP1, TP2.
+### 🔔 Cảnh báo Thường: Chạm Dải Biên Bollinger Bands
+* Giá chạm dải biên trên `Bands(20) Upper` hoặc dải biên dưới `Bands(20) Lower`.
+* Header thông báo chuông: `🔔 CẢNH BÁO: GIÁ CHẠM DẢI BOLLINGER BANDS`.
+* Dành cho trader theo dõi biến động sớm của thị trường.
 
-### 🔥🔥 Tier 2: Xác suất Cực Cao (High Probability - True Liquidity Sweep / SFP)
+### 🔥 Tier 1 (1 Đốm Lửa): Khớp Vùng Entry BB + ATR
+* Giá bung chạm/vượt ngưỡng Entry mở rộng kiệt sức của dải Bollinger Bands kết hợp ATR(14):
+  - **Bán (Sell Entry):** Giá $\ge \text{Bands(20) Upper} + \text{ATR}(14)$
+  - **Mua (Buy Entry):** Giá $\le \text{Bands(20) Lower} - \text{ATR}(14)$
+* Header thông báo: `🔥 [TIER 1] KHỚP VÙNG ENTRY BB + ATR (BOLLINGER BANDS + ATR)`.
+* Biên độ tăng/giảm bị kéo dãn cực độ (Overbought/Oversold Exhaustion).
+
+### 🔥🔥 Tier 2 (2 Đốm Lửa): Hợp Lưu BB + ATR + RSI Cực Trị
+* Giá chạm vùng Entry BB+ATR **ĐỒNG THỜI** xung lượng đảo chiều RSI(14) đạt ngưỡng cực đại:
+  - **Bán:** Giá $\ge \text{BB Upper} + \text{ATR}$ **VÀ** $RSI(14) \ge 70$ (Quá Mua)
+  - **Mua:** Giá $\le \text{BB Lower} - \text{ATR}$ **VÀ** $RSI(14) \le 30$ (Quá Bán)
+* Header thông báo: `🔥🔥 [TIER 2] HỢP LƯU ENTRY (BB + ATR) + RSI QUÁ MUA / QUÁ BÁN`.
+* Xác suất đảo chiều cực cao khi cả biên độ và chỉ báo xung lượng cùng đồng pha!
+
+### 🔥🔥🔥 Tier 3 (3 Đốm Lửa - VIP): Xác suất Tối Thượng (Quét Thanh Khoản Thật / SFP)
 * Tự động kích hoạt khi nến tín hiệu **vừa thực hiện cú quét thanh khoản thật (True Liquidity Sweep)** trên cấu trúc bể thanh khoản M15 (BSL / SSL hoặc EQH / EQL):
   - **Quét Đáy (SSL Sweep -> Canh BUY):** Nến đâm thủng đáy cũ M15 nhưng rút râu ngược lên đóng cửa bên trên.
   - **Quét Đỉnh (BSL Sweep -> Canh SELL):** Nến bung vượt đỉnh cũ M15 nhưng rút râu ngược xuống đóng cửa bên dưới.
@@ -146,7 +161,7 @@ Hệ thống tự động phân loại tất cả các tín hiệu vào lệnh t
 * **Gợi ý Stop Loss tối ưu:** Đặt an toàn ngay sau râu nến quét:
   - BUY: $SL = \text{Candle Low} - 0.2 \times ATR(14)$
   - SELL: $SL = \text{Candle High} + 0.2 \times ATR(14)$
-* **Tỷ lệ thắng (Winrate) và R:R của Tier 2 vượt trội**, phù hợp cho trader tự tin vào lệnh với biên độ cắt lỗ cực ngắn!
+* **Tỷ lệ thắng (Winrate) và R:R của Tier 3 vượt trội nhất hệ thống!** Tự động phát cảnh báo VIP cho người dùng kể cả khi tắt cảnh báo thông thường!
 
 ---
 

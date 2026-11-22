@@ -51,7 +51,7 @@ Hệ thống tích hợp các thuật toán phân tích kỹ thuật thời gian
 | **Order Blocks (SMC)** | `/ob` (hoặc `/smc`, `/orderblock`) | Mở Dashboard riêng SMC Order Blocks (Vùng Cung - Cầu) |
 | | `/ob m5`, `/ob m15`, `/ob h1` | Xem các vùng Supply & Demand chưa triệt tiêu (Unmitigated) |
 | | `/ob on` / `/ob off` | Bật / Tắt nhanh cảnh báo tự động Order Block |
-| **Tier 2 (VIP)** | `/tier2` (hoặc `/sweep`, `/sfp`) | Bật / Tắt riêng cảnh báo Quét Thanh Khoản (High Probability) |
+| **Tier 3 (VIP)** | `/tier3` (hoặc `/tier2`, `/sweep`) | Bật / Tắt riêng cảnh báo Quét Thanh Khoản VIP (🔥🔥🔥) |
 | **BB + ATR (M5)** | `/bbatr` (hoặc `/bb`) | Mở bảng đo kỹ thuật M5, vùng Entry Buy/Sell, SL, TP, Bias ngày |
 | | `/bbatr on` / `/bbatr off` | Bật / Tắt nhận cảnh báo tự động XAU/USD M5 |
 | | `/bbatr bias buy` / `sell` / `both` | Lọc hướng giao dịch: Chỉ Buy, Chỉ Sell hoặc Cả 2 chiều |

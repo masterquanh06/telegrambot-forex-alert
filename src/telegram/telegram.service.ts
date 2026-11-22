@@ -106,7 +106,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   <i>👉 Bot tự động phát hiện số liệu công bố Actual + Forecast + Previous và báo NGAY LẬP TỨC qua Telegram!</i>
 
 📋 <b>DANH SÁCH CÁC LỆNH TÍNH NĂNG:</b>
-🔥 <code>/tier2</code> (hoặc <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
+🔥 <code>/tier3</code> (hoặc <code>/tier2</code>, <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản VIP (High Probability)
 🌊 <code>/nwe</code> (hoặc <code>/envelope</code>) - Bảng Dashboard Nadaraya-Watson Envelope (NWE + Cản động)
 🧱 <code>/ob</code> (hoặc <code>/smc</code>, <code>/orderblock</code>) - Bảng Dashboard SMC Order Blocks (Vùng Cung/Cầu)
 🎯 <code>/bbatr</code> (hoặc <code>/bb</code>) - Chiến lược Bollinger Bands(20) + ATR(14) khung M5
@@ -945,8 +945,8 @@ Gõ lệnh theo cú pháp:
       }
     });
 
-    // 10. Lệnh /tier2 hoặc /sweep - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản Tier 2 (High Probability)
-    this.bot.command(['tier2', 'sweep', 'sfp'], async (ctx) => {
+    // 10. Lệnh /tier2 hoặc /tier3 hoặc /sweep - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản VIP (High Probability)
+    this.bot.command(['tier2', 'tier3', 'sweep', 'sfp'], async (ctx) => {
       const chatId = ctx.chat.id.toString();
       const username = ctx.from?.username || ctx.from?.first_name;
       await this.watchlistService.registerUser(chatId, username);
@@ -970,16 +970,17 @@ Gõ lệnh theo cú pháp:
 
       const statusBadge = isEnabled ? '🟢 ĐANG BẬT (Ưu tiên phát cảnh báo)' : '⚪ ĐÃ TẮT';
       const msg =
-        `🔥 <b>CÀI ĐẶT CẢNH BÁO TIER 2 (QUÉT THANH KHOẢN - SFP):</b> <b>${statusBadge}</b>\n\n` +
+        `🔥 <b>CÀI ĐẶT CẢNH BÁO QUÉT THANH KHOẢN (TIER 3 / SFP):</b> <b>${statusBadge}</b>\n\n` +
         (isEnabled
-          ? '<i>👉 Khi xuất hiện cú quét râu thanh khoản M15 hợp lưu cùng BB+ATR hoặc NWE+SMC, bot sẽ NGAY LẬP TỨC gửi cảnh báo Tier 2 cho bạn (kể cả khi bạn tắt cảnh báo thông thường)!</i>'
-          : '<i>👉 Bạn đã chủ động TẮT cảnh báo Tier 2. Bot sẽ không gửi tín hiệu quét thanh khoản cho bạn nữa.</i>');
+          ? '<i>👉 Khi xuất hiện cú quét râu thanh khoản M15 hợp lưu cùng BB+ATR hoặc NWE+SMC, bot sẽ NGAY LẬP TỨC gửi cảnh báo Tier 3 (🔥🔥🔥) cho bạn (kể cả khi bạn tắt cảnh báo thông thường)!</i>'
+          : '<i>👉 Bạn đã chủ động TẮT cảnh báo Quét Thanh Khoản. Bot sẽ không gửi tín hiệu quét râu cho bạn nữa.</i>');
 
       return ctx.replyWithHTML(
         msg,
         Markup.inlineKeyboard([
-          [Markup.button.callback(isEnabled ? '🔕 Tắt Cảnh Báo Tier 2' : '🔔 Bật Cảnh Báo Tier 2', 'smc_toggle_tier2')],
+          [Markup.button.callback(isEnabled ? '🔕 Tắt Cảnh Báo Quét TK' : '🔔 Bật Cảnh Báo Quét TK', 'smc_toggle_tier2')],
           [
+            Markup.button.callback('📊 Bảng BB+ATR', 'bbatr_menu'),
             Markup.button.callback('🌊 Bảng NWE', 'nwe_view:M15'),
             Markup.button.callback('🧱 Bảng Order Block', 'ob_view:M15'),
           ],
@@ -1870,7 +1871,7 @@ ${summaryTag}
       ],
       [
         Markup.button.callback(
-          isTier2Enabled ? '🔥 Tier 2 (Quét TK): ✅ BẬT' : '🔥 Tier 2 (Quét TK): ❌ TẮT',
+          isTier2Enabled ? '🔥 Tier 3 (Quét TK): ✅ BẬT' : '🔥 Tier 3 (Quét TK): ❌ TẮT',
           'bbatr_toggle_tier2',
         ),
         Markup.button.callback('ℹ️ Hướng Dẫn', 'bbatr_help'),
@@ -1944,12 +1945,20 @@ ${summaryTag}
 • <b>Điểm Cắt Lỗ (SL):</b> <code>SL = Lower Entry - ATR(14)</code> (Đặt dưới Entry đúng 1 ATR)
 • <b>Hành động:</b> Khi giá chạm hoặc đâm thủng ngưỡng này trên nến M5, canh mở vị thế MUA (Long) bắt đáy hồi phục.
 
-<b>3. BỘ LỌC XU HƯỚNG CHÍNH TRONG NGÀY (DAILY TREND BIAS):</b>
+<b>3. HỆ THỐNG PHÂN CẤP CẢNH BÁO (TIER SYSTEM):</b>
+• 🔔 <b>Cảnh Báo Chạm Dải BB:</b> Giá nến M5 chạm dải Bands(20) Upper hoặc Bands(20) Lower -> Cảnh báo theo dõi thông thường.
+• 🔥 <b>TIER 1 (1 Đốm Lửa):</b> Khớp công thức Entry mở rộng <code>Bands(20) Upper + ATR(14)</code> hoặc <code>Bands(20) Lower - ATR(14)</code>.
+• 🔥🔥 <b>TIER 2 (2 Đốm Lửa):</b> Khớp công thức Entry BB+ATR CỘNG VỚI chỉ số RSI cực trị:
+   - SELL: <code>BB Upper + ATR</code> VÀ <code>RSI(14) ≥ 70</code> (Quá Mua)
+   - BUY: <code>BB Lower - ATR</code> VÀ <code>RSI(14) ≤ 30</code> (Quá Bán)
+• 🔥🔥🔥 <b>TIER 3 (3 Đốm Lửa - VIP):</b> Tín hiệu tối thượng khi có thêm <b>Quét Thanh Khoản Thật (True Liquidity Sweep)</b> khung M15 rút râu nến đảo chiều!
+
+<b>4. BỘ LỌC XU HƯỚNG CHÍNH TRONG NGÀY (DAILY TREND BIAS):</b>
 • 🟢 <b>BUY ONLY:</b> Khi xu hướng ngày là Tăng mạnh, chỉ nhận cảnh báo khi giá chạm Lower Entry để BUY (bỏ qua Upper Entry).
 • 🔴 <b>SELL ONLY:</b> Khi xu hướng ngày là Giảm mạnh, chỉ nhận cảnh báo khi giá chạm Upper Entry để SELL (bỏ qua Lower Entry).
 • ⚖️ <b>BOTH (Mặc định):</b> Nhận cảnh báo cả 2 chiều BUY & SELL khi có tín hiệu.
 
-<b>4. CÚ PHÁP LỆNH:</b>
+<b>5. CÚ PHÁP LỆNH:</b>
 • <code>/bbatr</code> (hoặc <code>/bb</code>) - Mở Bảng đo kỹ thuật XAU/USD M5
 • <code>/bbatr bias buy</code> (hoặc <code>/bbatr buy</code>) - Lọc chỉ canh BUY
 • <code>/bbatr bias sell</code> (hoặc <code>/bbatr sell</code>) - Lọc chỉ canh SELL

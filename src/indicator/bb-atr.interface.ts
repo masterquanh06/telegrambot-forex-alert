@@ -82,7 +82,7 @@ export interface BbAtrState {
   signal: BbAtrSignalType;
   signalReason: string;
   sweepSignal?: SweepSignal;
-  alertTier?: 1 | 2;
+  alertTier?: 0 | 1 | 2 | 3;
   updatedAt: Date;
 }
 
