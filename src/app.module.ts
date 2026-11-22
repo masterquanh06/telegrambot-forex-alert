@@ -10,6 +10,7 @@ import { GoldModule } from './gold/gold.module';
 import { AlertModule } from './alert/alert.module';
 import { IndicatorModule } from './indicator/indicator.module';
 import { SmcModule } from './smc/smc.module';
+import { LiquiditySweepModule } from './services/liquiditySweep.module';
 
 @Controller()
 class HelloController {
@@ -34,6 +35,7 @@ class HelloController {
     AlertModule,
     IndicatorModule,
     SmcModule,
+    LiquiditySweepModule,
   ],
   controllers: [HelloController],
 })

@@ -1,4 +1,5 @@
 import { EmaTimeframe } from './indicator.interface';
+import { SweepSignal } from '../services/liquiditySweep';
 
 export interface CandleData {
   time: number;
@@ -80,6 +81,8 @@ export interface BbAtrState {
   // Trạng thái tín hiệu
   signal: BbAtrSignalType;
   signalReason: string;
+  sweepSignal?: SweepSignal;
+  alertTier?: 1 | 2;
   updatedAt: Date;
 }
 

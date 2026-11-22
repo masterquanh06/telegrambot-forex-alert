@@ -14,6 +14,7 @@ import {
   CreateBbAtrAlertResult,
   ActiveBbAtrAlertDetail,
 } from './bb-atr.interface';
+import { LiquiditySweepService, SweepSignal } from '../services/liquiditySweep';
 
 @Injectable()
 export class BbAtrService implements OnModuleInit, OnModuleDestroy {
@@ -105,6 +106,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
+    private readonly liquiditySweepService: LiquiditySweepService,
   ) {}
 
   onModuleInit() {
@@ -1181,6 +1183,30 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
           state.signal === 'ENTRY_BUY' ||
           (state.signal as any) === 'BUY';
 
+        // KIỂM TRA QUÉT THANH KHOẢN (LIQUIDITY SWEEP) KHUNG M15 CHO TÍN HIỆU M5
+        const expectedDirection = isSellSide ? 'SELL' : 'BUY';
+        let sweepSignal: SweepSignal = { hasSweep: false };
+        try {
+          const m15Data = await this.fetchCandles('XAU', 'M15', 100);
+          if (m15Data?.candles && this.liveCandles.length > 0) {
+            sweepSignal = this.liquiditySweepService.checkRecentSweep(
+              this.liveCandles,
+              m15Data.candles,
+              expectedDirection,
+              state.atrValue,
+            );
+          }
+        } catch (e: any) {
+          this.logger.debug(`Không thể quét liquidity sweep M15: ${e.message}`);
+        }
+
+        state.sweepSignal = sweepSignal;
+        state.alertTier = sweepSignal.hasSweep ? 2 : 1;
+
+        if (sweepSignal.hasSweep && sweepSignal.pool?.id) {
+          this.liquiditySweepService.markPoolAsSwept(sweepSignal.pool.id);
+        }
+
         const alertMessage = this.renderAlertMessage(state, state.signal);
 
         let sentCount = 0;
@@ -1788,9 +1814,33 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       '• Giá đã chạm dải biên trên Bollinger Bands (vùng Quá Mua).\n' +
       '• Thích hợp quan sát nến đảo chiều hoặc canh nhồi lệnh tại vùng Entry mở rộng (BB Upper + ATR).';
 
+    const isTier2 = state.alertTier === 2 && state.sweepSignal?.hasSweep && !!state.sweepSignal.pool;
+    const sweep = state.sweepSignal;
+
+    let sweepBlock = '';
+    if (isTier2 && sweep?.pool) {
+      headerEmoji = '🔥🔥 ' + (isSell ? '🔴🔴' : '🟢🟢');
+      headerTitle = '[TIER 2 - HIGH PROBABILITY] QUÉT THANH KHOẢN + BOLLINGER BANDS (20) & ATR (14)';
+
+      const poolTypeLabel =
+        sweep.type === 'SELL_SWEEP'
+          ? 'Quét Đỉnh (BSL Sweep -> Canh SELL)'
+          : 'Quét Đáy (SSL Sweep -> Canh BUY)';
+      const majorTag = sweep.pool.isMajorPool ? ' ⭐ [EQH/EQL Bể lớn]' : '';
+      const wickPct = ((sweep.wickRatio || 0) * 100).toFixed(1);
+
+      sweepBlock += `🌊 <b>TÍN HIỆU QUÉT THANH KHOẢN THẬT (TRUE LIQUIDITY SWEEP):</b>\n`;
+      sweepBlock += `• 🎯 <b>Loại quét:</b> <b>${poolTypeLabel}</b>\n`;
+      sweepBlock += `• 📍 <b>Mốc bị quét:</b> <code>$${sweep.pool.price.toFixed(2)}</code> <i>(hình thành lúc ${sweep.pool.timeStr} khung M15)</i>${majorTag}\n`;
+      sweepBlock += `• 📏 <b>Độ sâu quét:</b> <code>$${sweep.sweepDepth?.toFixed(2)}</code> (${sweep.sweepDepthAtrRatio} ATR) - Râu nến rút: <b>${wickPct}%</b>\n`;
+      sweepBlock += `• 🛑 <b>Gợi ý SL tối ưu sau râu quét:</b> <code>$${sweep.suggestedSL?.toFixed(2)}</code>\n\n`;
+    }
+
     if (signalType === 'SELL_CONFLUENCE') {
-      headerEmoji = '🎯🔴🔴';
-      headerTitle = 'ĐÃ ĐỦ ĐIỀU KIỆN VÀO LỆNH SELL (CHẠM BB TRÊN + RSI ≥ 70)!';
+      if (!isTier2) {
+        headerEmoji = '🎯🔴🔴';
+        headerTitle = 'ĐÃ ĐỦ ĐIỀU KIỆN VÀO LỆNH SELL (CHẠM BB TRÊN + RSI ≥ 70)!';
+      }
       actionText =
         `🔴 <b>ĐÃ THỎA MÃN CẢ 2 TIÊU CHÍ VÀO LỆNH SELL (M5):</b>\n` +
         `  1️⃣ <b>Chạm dải Bollinger Bands trên:</b> Nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã chạm/vượt <b>Bands(20) Upper (${this.formatPrice(state.bbUpper, state.assetType)})</b>\n` +
@@ -1800,8 +1850,10 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         '• Cả 2 điều kiện kỹ thuật đã đồng pha: Lực tăng bị kéo giãn kịch trần tại BB Upper kết hợp quá mua nặng RSI(14) ≥ 70.\n' +
         '• Thích hợp mở vị thế <b>SELL / SHORT</b> với quản trị vốn Stop Loss = 1 ATR.';
     } else if (signalType === 'ENTRY_SELL') {
-      headerEmoji = '🚨🔴🔴';
-      headerTitle = 'TÍN HIỆU CỰC ĐẠI: KHỚP VÙNG ENTRY SELL (BB UPPER + ATR)!';
+      if (!isTier2) {
+        headerEmoji = '🚨🔴🔴';
+        headerTitle = 'TÍN HIỆU CỰC ĐẠI: KHỚP VÙNG ENTRY SELL (BB UPPER + ATR)!';
+      }
       const rsiSub = state.rsiValue !== undefined ? `\n• Chỉ số RSI(14): <b>${state.rsiValue.toFixed(2)}</b>${state.rsiValue >= 70 ? ' <i>(Đạt Quá Mua ≥ 70)</i>' : ''}` : '';
       actionText =
         `🔴 Giá nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã bung ra ngoài dải trên thêm 1 ATR (<code>${this.formatPrice(state.upperEntry, state.assetType)}</code>)${rsiSub}`;
@@ -1810,8 +1862,10 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         '• Giá đã vượt ra ngoài dải Bollinger Upper 1 khoảng bằng 1 ATR(14). Biên độ tăng bị kéo dãn cực độ, lực mua suy kiệt (Overbought Exhaustion).\n' +
         '• Thích hợp mở vị thế <b>SELL / SHORT</b> lướt sóng hoặc chốt lời vị thế BUY trước đó.';
     } else if (signalType === 'BUY_CONFLUENCE') {
-      headerEmoji = '🎯🟢🟢';
-      headerTitle = 'ĐÃ ĐỦ ĐIỀU KIỆN VÀO LỆNH BUY (CHẠM BB DƯỚI + RSI ≤ 30)!';
+      if (!isTier2) {
+        headerEmoji = '🎯🟢🟢';
+        headerTitle = 'ĐÃ ĐỦ ĐIỀU KIỆN VÀO LỆNH BUY (CHẠM BB DƯỚI + RSI ≤ 30)!';
+      }
       actionText =
         `🟢 <b>ĐÃ THỎA MÃN CẢ 2 TIÊU CHÍ VÀO LỆNH BUY (M5):</b>\n` +
         `  1️⃣ <b>Chạm dải Bollinger Bands dưới:</b> Nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã chạm/thủng <b>Bands(20) Lower (${this.formatPrice(state.bbLower, state.assetType)})</b>\n` +
@@ -1821,8 +1875,10 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         '• Cả 2 điều kiện kỹ thuật đã đồng pha: Nến M5 chạm biên dưới Bollinger Bands kết hợp RSI chạm vùng Quá Bán (≤ 30).\n' +
         '• Xác suất đảo chiều tăng phục hồi rất cao! Thích hợp giải ngân vị thế <b>BUY / LONG</b> với quản trị vốn Stop Loss = 1 ATR.';
     } else if (signalType === 'ENTRY_BUY') {
-      headerEmoji = '🚨🟢🟢';
-      headerTitle = 'TÍN HIỆU CỰC ĐẠI: KHỚP VÙNG ENTRY BUY (BB LOWER - ATR)!';
+      if (!isTier2) {
+        headerEmoji = '🚨🟢🟢';
+        headerTitle = 'TÍN HIỆU CỰC ĐẠI: KHỚP VÙNG ENTRY BUY (BB LOWER - ATR)!';
+      }
       const rsiSub = state.rsiValue !== undefined ? `\n• Chỉ số RSI(14): <b>${state.rsiValue.toFixed(2)}</b>${state.rsiValue <= 30 ? ' <i>(Đạt Quá Bán ≤ 30)</i>' : ''}` : '';
       actionText =
         `🟢 Giá nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã đâm thủng ra ngoài dải dưới thêm 1 ATR (<code>${this.formatPrice(state.lowerEntry, state.assetType)}</code>)${rsiSub}`;
@@ -1831,8 +1887,10 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         '• Giá đã rơi ra ngoài dải Bollinger Lower 1 khoảng bằng 1 ATR(14). Biên độ giảm bị nén cực độ, lực bán cạn kiệt (Oversold Exhaustion).\n' +
         '• Thích hợp mở vị thế <b>BUY / LONG</b> bắt sóng hồi phục kỹ thuật hoặc dời chặn lỗ.';
     } else if (signalType === 'TOUCH_LOWER_BB' || (signalType as any) === 'BUY') {
-      headerEmoji = '🔔🟢';
-      headerTitle = 'CẢNH BÁO: GIÁ CHẠM DẢI DƯỚI BOLLINGER BANDS (BANDS LOWER)!';
+      if (!isTier2) {
+        headerEmoji = '🔔🟢';
+        headerTitle = 'CẢNH BÁO: GIÁ CHẠM DẢI DƯỚI BOLLINGER BANDS (BANDS LOWER)!';
+      }
       actionText = `🟢 Giá nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã chạm/thủng dải dưới <b>Bands(20) Lower (${this.formatPrice(state.bbLower, state.assetType)})</b>`;
       adviceText =
         '💡 <b>Khuyến nghị kỹ thuật:</b>\n' +
@@ -1840,8 +1898,18 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         '• Thích hợp quan sát nến rút chân phục hồi tăng hoặc canh bắt đáy tại vùng Entry mở rộng (BB Lower - ATR).';
     }
 
+    if (isTier2) {
+      adviceText =
+        '💡 <b>Khuyến nghị chiến lược [TIER 2 - XÁC SUẤT CAO]:</b>\n' +
+        `• Đã có tín hiệu săn thanh khoản (Liquidity Sweep / SFP) của tổ chức: Quét sạch phe breakout và đảo chiều rút râu cực mạnh!\n` +
+        `• Tỷ lệ thắng (Winrate) và R:R của kèo này rất cao. Ưu tiên vào lệnh <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> với SL ngay sau râu nến quét!`;
+    }
+
     let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    if (sweepBlock) {
+      msg += `${sweepBlock}`;
+    }
     if (state.consecutiveTouches && state.consecutiveTouches > 1) {
       msg += `⚠️ <b>CẢNH BÁO NẾN LIÊN TIẾP:</b> Nến M5 thứ <b>${state.consecutiveTouches}</b> liên tiếp tiếp tục chạm/thủng dải ${isSell ? 'trên' : 'dưới'}!\n\n`;
     }
@@ -1852,10 +1920,13 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     msg += `⚡ <b>Hiện tượng khớp điều kiện:</b>\n`;
     msg += `${actionText}\n\n`;
 
+    const effectiveSlPrice = isTier2 && sweep?.suggestedSL ? sweep.suggestedSL : slPrice;
+    const effectiveSlDesc = isTier2 && sweep?.suggestedSL ? '<b>(⭐ Sau râu quét + 0.2 ATR)</b>' : '<b>(= 1 ATR)</b>';
+
     msg += `🎯 <b>KẾ HOẠCH VÀO LỆNH & CẮT LỖ (QUẢN TRỊ RỦI RO):</b>\n`;
     msg += `• 🎯 <b>Điểm vào lệnh (${isSell ? 'SELL' : 'BUY'} Entry):</b> <code>${this.formatPrice(entryPrice, state.assetType)}</code>\n`;
-    msg += `• 🛑 <b>Điểm Cắt Lỗ (Stop Loss):</b> <code>${this.formatPrice(slPrice, state.assetType)}</code> <b>(= 1 ATR)</b>\n`;
-    msg += `   ↳ <i>Biên độ SL: ${this.formatPrice(state.slDistance, state.assetType)}</i>\n`;
+    msg += `• 🛑 <b>Điểm Cắt Lỗ (Stop Loss):</b> <code>${this.formatPrice(effectiveSlPrice, state.assetType)}</code> ${effectiveSlDesc}\n`;
+    msg += `   ↳ <i>Biên độ SL: ${this.formatPrice(Math.abs(entryPrice - effectiveSlPrice), state.assetType)}</i>\n`;
     msg += `• 🎯 <b>Mục tiêu TP1 (BB Middle):</b> <code>${this.formatPrice(tp1Price, state.assetType)}</code>\n`;
     msg += `• 🎯 <b>Mục tiêu TP2 (Tỷ lệ 1:2 R:R):</b> <code>${this.formatPrice(tp2Price, state.assetType)}</code>\n\n`;
 

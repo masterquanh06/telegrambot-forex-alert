@@ -3,6 +3,10 @@
 Bot Telegram phân tích tài chính thông minh, cảnh báo giao dịch thời gian thực cho **Vàng (XAU/USD)**, **Crypto (BTC, ETH, Altcoins)** và **Tin tức Kinh tế Vĩ mô (CPI, PPI, NFP, FED)**.
 
 ## 🚀 Tính năng nổi bật
+* **Phát hiện Quét Thanh Khoản (Liquidity Sweep / SFP) & Phân cấp Alert (Tier 1 / Tier 2):**
+  - Tự động quét các bể thanh khoản M15 (BSL / SSL, EQH / EQL) với cấu trúc Pivot High / Low (`left = 5`, `right = 5`).
+  - Xác nhận cú quét thật: đâm thủng nhưng rút râu $\ge 40\%$ đóng ngược vào trong, độ sâu chuẩn $0.1 - 1.5 \times ATR$.
+  - Phân cấp thông minh: **Tier 1 (Tín hiệu thường)** và **Tier 2 (🔥 HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN)** kèm gợi ý Stop Loss tối ưu sau râu quét.
 * **Chiến lược Bollinger Bands (20) + ATR (14) M5:**
   - Tự động quét và cảnh báo khi giá chạm dải Bands Upper/Lower kết hợp bộ lọc $RSI \ge 70$ (Quá mua) hoặc $RSI \le 30$ (Quá bán).
   - Tự động tính vùng Entry, Stop Loss ($1 \times ATR$) và Take Profit (Middle Band, Tỷ lệ 1:2 R:R).

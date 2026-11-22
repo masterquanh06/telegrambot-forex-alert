@@ -9,10 +9,11 @@
 1. [Bảng tóm tắt nhanh toàn bộ câu lệnh](#1-bảng-tóm-tắt-nhanh-toàn-bộ-câu-lệnh)
 2. [Chiến lược 1: Bollinger Bands (20) + ATR (14) M5](#2-chiến-lược-1-bollinger-bands-20--atr-14-m5)
 3. [Chiến lược 2: Nadaraya-Watson Envelope + SMC Order Blocks (Cung/Cầu)](#3-chiến-lược-2-nadaraya-watson-envelope--smc-order-blocks-cungcầu)
-4. [Cảnh báo Giá chạm tức thì (Vàng & Crypto)](#4-cảnh-báo-giá-chạm-tức-thì-vàng--crypto)
-5. [Theo dõi & Cài đặt Cảnh báo RSI Vàng đa khung](#5-theo-dõi--cài-đặt-cảnh-báo-rsi-vàng-đa-khung)
-6. [Lịch Kinh tế Vĩ mô & Tin tức nóng (CPI / NFP / FED)](#6-lịch-kinh-tế-vĩ-mô--tin-tức-nóng-cpi--nfp--fed)
-7. [Expert Advisor trên MetaTrader 5 (MT5 EA)](#7-expert-advisor-trên-metatrader-5-mt5-ea)
+4. [Hệ thống Phân cấp Cảnh báo: Tier 1 vs Tier 2 (Quét Thanh Khoản)](#4-hệ-thống-phân-cấp-cảnh-báo-tier-1-vs-tier-2-quét-thanh-khoản)
+5. [Cảnh báo Giá chạm tức thì (Vàng & Crypto)](#5-cảnh-báo-giá-chạm-tức-thì-vàng--crypto)
+6. [Theo dõi & Cài đặt Cảnh báo RSI Vàng đa khung](#6-theo-dõi--cài-đặt-cảnh-báo-rsi-vàng-đa-khung)
+7. [Lịch Kinh tế Vĩ mô & Tin tức nóng (CPI / NFP / FED)](#7-lịch-kinh-tế-vĩ-mô--tin-tức-nóng-cpi--nfp--fed)
+8. [Expert Advisor trên MetaTrader 5 (MT5 EA)](#8-expert-advisor-trên-metatrader-5-mt5-ea)
 
 ---
 
@@ -114,7 +115,30 @@ Gõ lệnh `/smc` để mở giao diện:
 
 ---
 
-## 4. Cảnh báo Giá chạm tức thì (Vàng & Crypto)
+## 4. Hệ thống Phân cấp Cảnh báo: Tier 1 vs Tier 2 (Quét Thanh Khoản)
+
+Hệ thống tự động phân loại tất cả các tín hiệu vào lệnh thành 2 cấp độ cảnh báo rõ rệt:
+
+### 🔹 Tier 1: Tín hiệu Tiêu chuẩn (Standard Confluence)
+* Khớp đầy đủ các điều kiện kỹ thuật gốc của chiến lược:
+  - **BB + ATR (M5):** Giá chạm dải Bands Upper/Lower kết hợp $RSI \ge 70$ hoặc $RSI \le 30$.
+  - **NWE + SMC:** Giá chạm dải NWE hoặc vùng Order Block (Demand / Supply).
+* Format cảnh báo chuẩn, cung cấp đầy đủ thông số Entry, SL, TP1, TP2.
+
+### 🔥🔥 Tier 2: Xác suất Cực Cao (High Probability - True Liquidity Sweep / SFP)
+* Tự động kích hoạt khi nến tín hiệu **vừa thực hiện cú quét thanh khoản thật (True Liquidity Sweep)** trên cấu trúc bể thanh khoản M15 (BSL / SSL hoặc EQH / EQL):
+  - **Quét Đáy (SSL Sweep -> Canh BUY):** Nến đâm thủng đáy cũ M15 nhưng rút râu ngược lên đóng cửa bên trên.
+  - **Quét Đỉnh (BSL Sweep -> Canh SELL):** Nến bung vượt đỉnh cũ M15 nhưng rút râu ngược xuống đóng cửa bên dưới.
+  - **Độ sâu quét hợp lệ:** Chuẩn từ $0.1 \times ATR$ đến $1.5 \times ATR$ (loại trừ chạm nhẹ hoặc nến xả gãy cấu trúc).
+  - **Tỷ lệ râu nến:** Râu nến đảo chiều chiếm $\ge 40\%$ tổng chiều dài cây nến.
+* **Gợi ý Stop Loss tối ưu:** Đặt an toàn ngay sau râu nến quét:
+  - BUY: $SL = \text{Candle Low} - 0.2 \times ATR(14)$
+  - SELL: $SL = \text{Candle High} + 0.2 \times ATR(14)$
+* **Tỷ lệ thắng (Winrate) và R:R của Tier 2 vượt trội**, phù hợp cho trader tự tin vào lệnh với biên độ cắt lỗ cực ngắn!
+
+---
+
+## 5. Cảnh báo Giá chạm tức thì (Vàng & Crypto)
 
 Bot theo dõi liên tục giá thị trường thời gian thực (real-time) và phát thông báo ngay lập tức khi giá thị trường chạm hoặc vượt ngưỡng kỳ vọng của bạn.
 
@@ -140,7 +164,7 @@ Bot theo dõi liên tục giá thị trường thời gian thực (real-time) v�
 
 ---
 
-## 5. Theo dõi & Cài đặt Cảnh báo RSI Vàng đa khung
+## 6. Theo dõi & Cài đặt Cảnh báo RSI Vàng đa khung
 
 Theo dõi xung lượng giá Vàng (XAU/USD) theo chu kỳ RSI(14) trên 7 khung thời gian: `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`.
 
@@ -156,7 +180,7 @@ Theo dõi xung lượng giá Vàng (XAU/USD) theo chu kỳ RSI(14) trên 7 khung
 
 ---
 
-## 6. Lịch Kinh tế Vĩ mô & Tin tức nóng (CPI / NFP / FED)
+## 7. Lịch Kinh tế Vĩ mô & Tin tức nóng (CPI / NFP / FED)
 
 Hệ thống kết nối nguồn dữ liệu lịch kinh tế ForexFactory với cơ chế **Adaptive Fast Polling** (tăng tốc độ quét lên mỗi 3-4 giây khi bước vào khung giờ vàng ra tin).
 
@@ -172,7 +196,7 @@ Hệ thống kết nối nguồn dữ liệu lịch kinh tế ForexFactory với
 
 ---
 
-## 7. Expert Advisor trên MetaTrader 5 (MT5 EA)
+## 8. Expert Advisor trên MetaTrader 5 (MT5 EA)
 
 Mã nguồn EA đã được tích hợp sẵn trong thư mục `mt5/` của dự án để bạn có thể gắn trực tiếp vào MT5:
 

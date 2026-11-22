@@ -1,3 +1,5 @@
+import { SweepSignal } from '../services/liquiditySweep';
+
 export type SmcTimeframe = 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1';
 
 export interface NweEnvelope {
@@ -52,6 +54,8 @@ export interface SmcAnalysisResult {
   touchingSupply: OrderBlock | null;
   signal: SmcSignalType;
   signalReason: string;
+  sweepSignal?: SweepSignal;
+  alertTier?: 1 | 2;
   updatedAt: Date;
 }
 

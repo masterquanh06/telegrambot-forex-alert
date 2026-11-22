@@ -12,6 +12,7 @@ import {
   UserSmcSettings,
 } from './smc.interface';
 import { CandleData } from '../indicator/bb-atr.interface';
+import { LiquiditySweepService, SweepSignal } from '../services/liquiditySweep';
 
 @Injectable()
 export class SmcService {
@@ -63,6 +64,7 @@ export class SmcService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
+    private readonly liquiditySweepService: LiquiditySweepService,
   ) {}
 
   registerActiveChat(chatId: string) {
@@ -385,6 +387,32 @@ export class SmcService {
       signalReason = `🟢 Giá chạm/thủng dải dưới Nadaraya-Watson Envelope ($${nwe.lowerBand}) [Hỗ trợ động: $${nwe.dynamicSupport}].`;
     }
 
+    // KIỂM TRA QUÉT THANH KHOẢN (LIQUIDITY SWEEP) CHO TÍN HIỆU SMC / NWE
+    let sweepSignal: SweepSignal = { hasSweep: false };
+    let alertTier: 1 | 2 = 1;
+
+    if (signal !== 'NORMAL') {
+      const isSellSide =
+        signal === 'CONFLUENCE_SELL' ||
+        signal === 'TOUCH_SUPPLY_OB' ||
+        signal === 'TOUCH_NWE_UPPER';
+      const expectedDirection = isSellSide ? 'SELL' : 'BUY';
+
+      try {
+        const m15Candles = timeframe === 'M15' ? candles : await this.fetchCandles('M15', 100);
+        sweepSignal = this.liquiditySweepService.checkRecentSweep(
+          candles,
+          m15Candles,
+          expectedDirection,
+        );
+        if (sweepSignal.hasSweep) {
+          alertTier = 2;
+        }
+      } catch (e: any) {
+        this.logger.debug(`Lỗi kiểm tra liquidity sweep trong SMC: ${e.message}`);
+      }
+    }
+
     const result: SmcAnalysisResult = {
       symbol: 'XAU',
       displaySymbol: 'XAU/USD (Vàng Forex)',
@@ -398,6 +426,8 @@ export class SmcService {
       touchingSupply,
       signal,
       signalReason,
+      sweepSignal,
+      alertTier,
       updatedAt: new Date(),
     };
 
@@ -672,8 +702,11 @@ export class SmcService {
 
           if (sentCount > 0) {
             triggeredCount++;
+            if (analysis.alertTier === 2 && analysis.sweepSignal?.pool?.id) {
+              this.liquiditySweepService.markPoolAsSwept(analysis.sweepSignal.pool.id);
+            }
             this.logger.log(
-              `🔔 [SMC/NWE ALERT] Khung ${tf}: ${analysis.signal} tại $${analysis.currentPrice} -> Đã gửi ${sentCount} user.`,
+              `🔔 [SMC/NWE ALERT ${analysis.alertTier === 2 ? 'TIER 2 (SWEEP)' : 'TIER 1'}] Khung ${tf}: ${analysis.signal} tại $${analysis.currentPrice} -> Đã gửi ${sentCount} user.`,
             );
 
             // Ghi log vào DB
@@ -758,6 +791,11 @@ export class SmcService {
 
     // 3. Trạng thái hiện tại
     msg += `⚡ <b>Trạng thái:</b> <b>${analysis.signalReason}</b>\n`;
+    if (analysis.alertTier === 2 && analysis.sweepSignal?.pool) {
+      const sweep = analysis.sweepSignal;
+      const poolLabel = sweep.type === 'SELL_SWEEP' ? 'Quét Đỉnh (BSL)' : 'Quét Đáy (SSL)';
+      msg += `🔥 <b>Tín hiệu nâng cao:</b> <b>[TIER 2] CÓ QUÉT THANH KHOẢN (${poolLabel}) tại $${sweep.pool.price} (SL: $${sweep.suggestedSL})</b>\n`;
+    }
 
     return msg;
   }
@@ -776,52 +814,101 @@ export class SmcService {
       year: 'numeric',
     }).format(new Date());
 
+    const isSell =
+      analysis.signal === 'CONFLUENCE_SELL' ||
+      analysis.signal === 'TOUCH_SUPPLY_OB' ||
+      analysis.signal === 'TOUCH_NWE_UPPER';
+    const isTier2 =
+      analysis.alertTier === 2 && analysis.sweepSignal?.hasSweep && !!analysis.sweepSignal.pool;
+    const sweep = analysis.sweepSignal;
+
     let headerEmoji = '🔔';
     let headerTitle = 'CẢNH BÁO KỸ THUẬT: KHỚP VÙNG QUAN TRỌNG!';
     let adviceText = '';
 
+    let sweepBlock = '';
+    if (isTier2 && sweep?.pool) {
+      headerEmoji = '🔥🔥 ' + (isSell ? '🔴🔴' : '🟢🟢');
+      headerTitle = '[TIER 2 - HIGH PROBABILITY] QUÉT THANH KHOẢN + NADARAYA-WATSON & SMC ORDER BLOCKS';
+
+      const poolTypeLabel =
+        sweep.type === 'SELL_SWEEP'
+          ? 'Quét Đỉnh (BSL Sweep -> Canh SELL)'
+          : 'Quét Đáy (SSL Sweep -> Canh BUY)';
+      const majorTag = sweep.pool.isMajorPool ? ' ⭐ [EQH/EQL Bể lớn]' : '';
+      const wickPct = ((sweep.wickRatio || 0) * 100).toFixed(1);
+
+      sweepBlock += `🌊 <b>TÍN HIỆU QUÉT THANH KHOẢN THẬT (TRUE LIQUIDITY SWEEP):</b>\n`;
+      sweepBlock += `• 🎯 <b>Loại quét:</b> <b>${poolTypeLabel}</b>\n`;
+      sweepBlock += `• 📍 <b>Mốc bị quét:</b> <code>$${sweep.pool.price.toFixed(2)}</code> <i>(hình thành lúc ${sweep.pool.timeStr} khung M15)</i>${majorTag}\n`;
+      sweepBlock += `• 📏 <b>Độ sâu quét:</b> <code>$${sweep.sweepDepth?.toFixed(2)}</code> (${sweep.sweepDepthAtrRatio} ATR) - Râu nến rút: <b>${wickPct}%</b>\n`;
+      sweepBlock += `• 🛑 <b>Gợi ý SL tối ưu sau râu quét:</b> <code>$${sweep.suggestedSL?.toFixed(2)}</code>\n\n`;
+    }
+
     if (analysis.signal === 'CONFLUENCE_SELL') {
-      headerEmoji = '🚨🔴🔴';
-      headerTitle = 'HỢP LƯU BÁN CỰC MẠNH: DẢI TRÊN NWE + VÙNG CUNG (SUPPLY OB)!';
+      if (!isTier2) {
+        headerEmoji = '🚨🔴🔴';
+        headerTitle = 'HỢP LƯU BÁN CỰC MẠNH: DẢI TRÊN NWE + VÙNG CUNG (SUPPLY OB)!';
+      }
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá chạm đồng thời 2 lớp cản: Biên trên Nadaraya-Watson Envelope và khối Bearish Order Block.\n' +
         '• Áp lực bán chặn chiều tăng cực lớn. Thích hợp mở vị thế <b>SELL / SHORT</b> hoặc chốt lời vị thế BUY!';
     } else if (analysis.signal === 'CONFLUENCE_BUY') {
-      headerEmoji = '🚨🟢🟢';
-      headerTitle = 'HỢP LƯU MUA CỰC MẠNH: DẢI DƯỚI NWE + VÙNG CẦU (DEMAND OB)!';
+      if (!isTier2) {
+        headerEmoji = '🚨🟢🟢';
+        headerTitle = 'HỢP LƯU MUA CỰC MẠNH: DẢI DƯỚI NWE + VÙNG CẦU (DEMAND OB)!';
+      }
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá chạm đồng thời 2 lớp đỡ: Biên dưới Nadaraya-Watson Envelope và khối Bullish Order Block.\n' +
         '• Lực cầu bắt đáy nhập cuộc mạnh. Thích hợp mở vị thế <b>BUY / LONG</b> bắt sóng hồi phục!';
     } else if (analysis.signal === 'TOUCH_SUPPLY_OB') {
-      headerEmoji = '🧱🔴';
-      headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CUNG (SUPPLY ZONE / BEARISH ORDER BLOCK)!';
+      if (!isTier2) {
+        headerEmoji = '🧱🔴';
+        headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CUNG (SUPPLY ZONE / BEARISH ORDER BLOCK)!';
+      }
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá đã tiến vào vùng tồn đọng lệnh bán của cá mập (Bearish OB). Canh phản ứng từ chối giá (rút râu nến) để vào lệnh <b>SELL</b>.';
     } else if (analysis.signal === 'TOUCH_DEMAND_OB') {
-      headerEmoji = '🧱🟢';
-      headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CẦU (DEMAND ZONE / BULLISH ORDER BLOCK)!';
+      if (!isTier2) {
+        headerEmoji = '🧱🟢';
+        headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CẦU (DEMAND ZONE / BULLISH ORDER BLOCK)!';
+      }
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá đã rơi vào vùng thanh khoản mua của tổ chức (Bullish OB). Canh phản ứng đảo chiều rút chân để vào lệnh <b>BUY</b>.';
     } else if (analysis.signal === 'TOUCH_NWE_UPPER') {
-      headerEmoji = '🌊🔴';
-      headerTitle = 'GIÁ CHẠM DẢI TRÊN NADARAYA-WATSON ENVELOPE (QUÁ MUA)!';
+      if (!isTier2) {
+        headerEmoji = '🌊🔴';
+        headerTitle = 'GIÁ CHẠM DẢI TRÊN NADARAYA-WATSON ENVELOPE (QUÁ MUA)!';
+      }
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Biên độ giá bung vượt khỏi dải biên trên NWE (Quá Mua kỹ thuật). Xác suất điều chỉnh ngắn hạn rất cao.';
     } else if (analysis.signal === 'TOUCH_NWE_LOWER') {
-      headerEmoji = '🌊🟢';
-      headerTitle = 'GIÁ CHẠM DẢI DƯỚI NADARAYA-WATSON ENVELOPE (QUÁ BÁN)!';
+      if (!isTier2) {
+        headerEmoji = '🌊🟢';
+        headerTitle = 'GIÁ CHẠM DẢI DƯỚI NADARAYA-WATSON ENVELOPE (QUÁ BÁN)!';
+      }
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Biên độ giá xuyên thủng dải biên dưới NWE (Quá Bán kỹ thuật). Thích hợp quan sát nhịp hồi phục kỹ thuật.';
     }
 
+    if (isTier2) {
+      adviceText =
+        '💡 <b>Khuyến nghị chiến lược [TIER 2 - SUPER CONFLUENCE]:</b>\n' +
+        '• Đỉnh cao hợp lưu: Giá chạm vùng quan trọng (NWE / Order Block) ĐỒNG THỜI vừa quét sạch bể thanh khoản (Liquidity Sweep) và rút râu đảo chiều mạnh!\n' +
+        `• Tỷ lệ thắng (Winrate) cực cao. Thích hợp mở vị thế <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> với SL ngay sau râu nến quét!`;
+    }
+
     let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    if (sweepBlock) {
+      msg += `${sweepBlock}`;
+    }
     msg += `💎 <b>Tài sản:</b> <code>${analysis.displaySymbol}</code>\n`;
     msg += `⏳ <b>Khung thời gian:</b> <b>${this.timeframeLabels[analysis.timeframe] || analysis.timeframe}</b>\n`;
     msg += `💵 <b>Giá thị trường hiện tại:</b> <code>$${analysis.currentPrice.toFixed(2)}</code>\n\n`;
