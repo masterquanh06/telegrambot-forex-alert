@@ -1,244 +1,152 @@
 # 📖 BẢNG TỔNG HỢP TOÀN BỘ CÂU LỆNH & HƯỚNG DẪN SỬ DỤNG BOT TELEGRAM
 
-> **Hệ thống Bot:** Cảnh báo Giao dịch Tài chính, Vĩ mô, Bollinger Bands (20) + ATR (14), Nadaraya-Watson Envelope & Smart Money Concepts (Order Blocks / Cung Cầu).  
-> **Tài sản trọng tâm:** Vàng (XAU/USD), Crypto (BTC, ETH, SOL, v.v.), Ngoại hối & Tin tức Kinh tế Vĩ mô.
+> **Hệ thống Bot:** Cảnh báo Giao dịch Tài chính, Vĩ mô, Bollinger Bands (20) + ATR (14) + RSI (14), Nadaraya-Watson Envelope (NWE) & Smart Money Concepts (SMC Order Blocks Chéo Khung).  
+> **Tài sản trọng tâm:** Vàng (`XAU/USD`), Crypto (`BTC`, `ETH`, `SOL`, ...), Ngoại hối & Tin tức Kinh tế Vĩ mô.  
+> **Chi tiết công thức từng Tier:** Xem đầy đủ tại 👉 **[TIER_SYSTEM.md](TIER_SYSTEM.md)**
 
 ---
 
 ## 📑 MỤC LỤC
 1. [Bảng tóm tắt nhanh toàn bộ câu lệnh](#1-bảng-tóm-tắt-nhanh-toàn-bộ-câu-lệnh)
-2. [Chiến lược 1: Bollinger Bands (20) + ATR (14) M5](#2-chiến-lược-1-bollinger-bands-20--atr-14-m5)
-3. [Chiến lược 2: Nadaraya-Watson Envelope + SMC Order Blocks (Cung/Cầu)](#3-chiến-lược-2-nadaraya-watson-envelope--smc-order-blocks-cungcầu)
-4. [Hệ thống Phân cấp Cảnh báo: Tier 1 vs Tier 2 (Quét Thanh Khoản)](#4-hệ-thống-phân-cấp-cảnh-báo-tier-1-vs-tier-2-quét-thanh-khoản)
+2. [Chiến lược 1: Bollinger Bands (20) + ATR (14) + RSI (14) M5](#2-chiến-lược-1-bollinger-bands-20--atr-14--rsi-14-m5)
+3. [Chiến lược 2: Nadaraya-Watson Envelope (NWE) + SMC Order Blocks Chéo Khung](#3-chiến-lược-2-nadaraya-watson-envelope-nwe--smc-order-blocks-chéo-khung)
+4. [Công tắc VIP Tier 3 & Quyền nhận tin](#4-công-tắc-vip-tier-3--quyền-nhận-tin)
 5. [Cảnh báo Giá chạm tức thì (Vàng & Crypto)](#5-cảnh-báo-giá-chạm-tức-thì-vàng--crypto)
 6. [Theo dõi & Cài đặt Cảnh báo RSI Vàng đa khung](#6-theo-dõi--cài-đặt-cảnh-báo-rsi-vàng-đa-khung)
 7. [Lịch Kinh tế Vĩ mô & Tin tức nóng (CPI / NFP / FED)](#7-lịch-kinh-tế-vĩ-mô--tin-tức-nóng-cpi--nfp--fed)
-8. [Expert Advisor trên MetaTrader 5 (MT5 EA)](#8-expert-advisor-trên-metatrader-5-mt5-ea)
+8. [MetaTrader 5 Expert Advisors (MT5 EA) & Webhook](#8-metatrader-5-expert-advisors-mt5-ea--webhook)
 
 ---
 
 ## 1. Bảng tóm tắt nhanh toàn bộ câu lệnh
 
-| Nhóm tính năng | Câu lệnh chính | Lệnh viết tắt / Bí danh | Mô tả chức năng |
+| Nhóm tính năng | Câu lệnh chính | Bí danh / Lệnh viết tắt | Mô tả chức năng |
 | :--- | :--- | :--- | :--- |
-| **Hệ thống** | `/start` | `/help` | Hiển thị bảng chào mừng và hướng dẫn tổng quan toàn bộ bot. |
-| **BB + ATR (M5)** | `/bbatr` | `/bb`, `/bb_atr`, `/bba`, `/bollinger`, `/strat` | Mở bảng đo kỹ thuật BB(20) + ATR(14) M5, giá Entry, SL, TP, Bias ngày. |
-| | `/bbatr on` / `/bbatr off` | | Bật hoặc tắt nhận cảnh báo tự động XAU/USD M5. |
-| | `/bbatr bias buy` | `/bb buy` | Lọc chỉ nhận cảnh báo Mua (Buy), bỏ qua chiều Bán. |
-| | `/bbatr bias sell` | `/bb sell` | Lọc chỉ nhận cảnh báo Bán (Sell), bỏ qua chiều Mua. |
-| | `/bbatr bias both` | `/bb both` | Bật cảnh báo cả 2 chiều Mua & Bán. |
-| | `/bbatr <mã> [khung]` | `/bb btc`, `/bb eth 15m` | Xem bảng đo BB+ATR cho coin/tài sản bất kỳ. |
-| | `/bbatr alert <mã>` | | Đặt cảnh báo cá nhân riêng cho mã bất kỳ. |
-| | `/bbatr list` | | Xem danh sách các cảnh báo BB+ATR cá nhân. |
-| | `/bbatr del <id>` | | Xóa một cảnh báo cá nhân theo mã ID. |
-| | `/bbatr clear` | | Xóa toàn bộ cảnh báo BB+ATR cá nhân của bạn. |
-| **NWE + SMC (Cung/Cầu)** | `/smc` | `/nwe`, `/ob`, `/orderblock`, `/zone` | Mở menu cài đặt Bật/Tắt NWE & SMC đa khung thời gian (`M5` đến `D1`). |
-| | `/smc <khung>` | `/smc m5`, `/smc m15`, `/smc h1` | Xem bảng phân tích NWE (Upper, Kernel, Lower) & Order Blocks gần nhất. |
-| | `/smc on` | | Bật nhận tất cả cảnh báo NWE & SMC trên mọi khung thời gian. |
-| | `/smc off` | | Tắt tạm thời toàn bộ cảnh báo NWE & SMC. |
-| **Cảnh báo Giá tức thì** | `/alert <mã> <giá>` | `/canhbao`, `/pricealert` | Đặt cảnh báo giá thị trường chạm mốc kỳ vọng (VD: `/alert xau 4200`). |
-| | `/alerts` | `/alert list`, `/dsalert` | Quản lý danh sách cảnh báo giá đang hoạt động của bạn. |
-| | `/alert del <id>` | `/alert remove <id>` | Hủy một cảnh báo giá theo ID (VD: `/alert del 2`). |
-| | `/alert clear` | `/alert del all` | Hủy toàn bộ cảnh báo giá đang chờ của bạn. |
-| **RSI Vàng (XAU/USD)** | `/gold` | `/xau`, `/vang`, `/goldrsi`, `/xaursi` | Xem bảng giá Vàng live và chỉ số RSI đa khung từ M1 đến D1. |
-| | `/goldalert` | `/xaualert`, `/goldsetting` | Mở menu cài đặt Bật/Tắt cảnh báo Quá Mua / Quá Bán RSI Vàng. |
-| **Kinh tế Vĩ mô** | `/calendar` | `/macro`, `/forex` | Xem lịch sự kiện kinh tế vĩ mô hôm nay (ForexFactory). |
-| | `/settings` | `/macro_settings`, `/setting` | Cài đặt bộ lọc nhận tin vĩ mô theo mức độ: 🔴 Đỏ, 🟠 Cam, 🟡 Vàng. |
+| **Hệ thống** | `/start` | `/help` | Hiển thị bảng chào mừng và danh sách tính năng tổng quan. |
+| **BB + ATR (M5)** | `/bbatr` | `/bb`, `/bb_atr`, `/bba`, `/bollinger`, `/strat` | Mở Dashboard BB(20) + ATR(14) + RSI(14) M5, vùng Entry, SL, TP, Bias ngày. |
+| | `/bbatr on` / `/bbatr off` | `/bb on`, `/bb off` | Bật hoặc tắt cảnh báo tự động XAU/USD M5 (Tier 0, 1, 2A, 2B). |
+| | `/bbatr bias buy` | `/bbatr buy`, `/bb buy`, `/bb long`, `/bb mua` | Lọc Daily Bias: chỉ nhận chiều **BUY** (bỏ qua SELL). |
+| | `/bbatr bias sell` | `/bbatr sell`, `/bb sell`, `/bb short`, `/bb ban` | Lọc Daily Bias: chỉ nhận chiều **SELL** (bỏ qua BUY). |
+| | `/bbatr bias both` | `/bbatr both`, `/bb both`, `/bb all` | Nhận cả 2 chiều **BUY & SELL**. |
+| | `/bbatr <mã> [khung]` | `/bb btc`, `/bb eth 15m` | Xem bảng đo BB+ATR cho mã Crypto/Vàng bất kỳ (`M1` đến `D1`). |
+| | `/bbatr alert <mã> [khung]` | `/bb dat btc 15m` | Tạo cảnh báo BB+ATR cá nhân cho mã bất kỳ. |
+| | `/bbatr list` | `/bb ds` | Xem danh sách cảnh báo BB+ATR cá nhân đang chạy. |
+| | `/bbatr del <id>` / `all` | `/bb xoa <id>`, `/bb huy <id>` | Xóa 1 cảnh báo cá nhân theo ID hoặc xóa toàn bộ. |
+| | `/bbatr help` | `/bb ?` | Xem hướng dẫn chiến lược & bảng Tier System BB+ATR. |
+| **NWE Envelope** | `/nwe` | `/envelope` | Mở Dashboard riêng dải Nadaraya-Watson Envelope & Dynamic S/R (`M15` mặc định). |
+| | `/nwe <khung>` | `/nwe m5`, `/nwe m15`, `/nwe h1`, `/nwe h4` | Xem thông số NWE Upper, Kernel, Lower theo khung cụ thể. |
+| | `/nwe on` / `/nwe off` | | Bật / Tắt cảnh báo tự động NWE. |
+| **Order Blocks (SMC)** | `/ob` | `/smc`, `/orderblock`, `/zone` | Mở Dashboard riêng SMC Order Blocks (Vùng Cung / Cầu Unmitigated). |
+| | `/ob <khung>` | `/ob m5`, `/ob m15`, `/ob h1`, `/ob h4` | Xem các khối Supply/Demand OB còn hiệu lực theo khung. |
+| | `/ob on` / `/ob off` | `/smc on`, `/smc off` | Bật / Tắt cảnh báo tự động Order Block. |
+| **VIP Tier 3** | `/tier3` | `/tier2`, `/sweep`, `/sfp` | Bật / Tắt riêng cảnh báo **Tier 3 VIP** (Rút râu M5 của BB+ATR & Rút râu M15 của SMC+NWE). |
+| **Cảnh báo Giá** | `/alert <mã> <giá>` | `/canhbao`, `/pricealert` | Đặt cảnh báo chạm giá tức thì (VD: `/alert xau 3650`, `/alert btc 95k`). |
+| | `/alerts` | `/alert list`, `/dsalert` | Xem và quản lý các cảnh báo giá đang chờ khớp. |
+| | `/alert del <id>` | `/alert remove <id>`, `/alert xoa <id>` | Hủy 1 cảnh báo giá theo ID. |
+| | `/alert clear` | `/alert del all` | Hủy toàn bộ cảnh báo giá đang chờ. |
+| **RSI Vàng** | `/gold` | `/xau`, `/vang`, `/goldrsi`, `/xaursi` | Xem bảng giá Vàng & chỉ số RSI(14) 7 khung (`M1` đến `D1`). |
+| | `/goldalert` | `/xaualert`, `/goldsetting`, `/goldsettings` | Cài đặt bật/tắt khung & bộ ngưỡng RSI (`70/30`, `75/25`, `80/20`). |
+| **Kinh tế Vĩ mô** | `/calendar` | `/macro`, `/forex` | Xem lịch kinh tế ForexFactory hôm nay (giờ Việt Nam). |
+| | `/settings` | `/macro_settings`, `/macrosetting`, `/setting` | Chọn mức độ tin tức muốn nhận: 🔴 Cao, 🟠 Trung bình, 🟡 Thấp. |
 
 ---
 
-## 2. Chiến lược 1: Bollinger Bands (20) + ATR (14) M5
+## 2. Chiến lược 1: Bollinger Bands (20) + ATR (14) + RSI (14) M5
 
-Chiến lược bám sát hành vi kiệt sức của giá tại biên dao động kết hợp với biên độ trung bình thực tế ATR.
+Chiến lược đo lực kiệt sức (Exhaustion) trên khung **M5** sử dụng dữ liệu **TradingView Live WebSocket (`OANDA:XAUUSD`, 0ms latency)** kết hợp TradingView Scanner và Binance fallback.
 
-### 📐 Công thức toán học
-* **Đường trung tâm (Middle Band):** $SMA(20)$
-* **Dải trên (Upper Band):** $SMA(20) + 2 \times \sigma$
-* **Dải dưới (Lower Band):** $SMA(20) - 2 \times \sigma$
-* **Điểm vào lệnh Bán (Sell Entry):** $\text{Bands}(20)\text{ Upper} + \text{ATR}(14)$
-* **Điểm vào lệnh Mua (Buy Entry):** $\text{Bands}(20)\text{ Lower} - \text{ATR}(14)$
-* **Mức Cắt Lỗ (Stop Loss - SL):** Cố định bằng $1 \times \text{ATR}(14)$ từ điểm Entry.
-* **Mức Chốt Lời (Take Profit - TP):**
-  - **TP1:** Đường trục giữa Bollinger Bands Middle ($SMA(20)$).
-  - **TP2:** Tỷ lệ R:R chuẩn $1:2$ so với khoảng cách SL.
+### 📐 Công thức cơ bản
+* **Bollinger Bands (20, 2):** `Middle = SMA(20)`, `Upper = Middle + 2σ`, `Lower = Middle - 2σ`.
+* **ATR(14) & RSI(14):** Wilder's Smoothing.
+* **Vùng Entry mở rộng:**
+  - 🔴 **Sell Entry:** `BB Upper + ATR(14)` → **SL:** `Sell Entry + ATR(14)`
+  - 🟢 **Buy Entry:** `BB Lower - ATR(14)` → **SL:** `Buy Entry - ATR(14)`
+  - **TP1:** `BB Middle` | **TP2:** Tỷ lệ `1:2 R:R`.
 
-### 🎯 Điều kiện nến phát tín hiệu cảnh báo (Phân cấp Tiers)
-* **Khung thời gian:** 5 Phút (M5).
-* 🔔 **Cảnh báo Chạm Dải BB thường:** Giá nến M5 chạm dải Bands(20) Upper hoặc Bands(20) Lower (thông báo theo dõi chuẩn).
-* 🔥 **Tier 1 (1 Đốm Lửa):** Giá chạm vùng Entry mở rộng `Bands(20) Upper + ATR(14)` (Bán) hoặc `Bands(20) Lower - ATR(14)` (Mua).
-* 🔥🔥 **Tier 2 (2 Đốm Lửa):** Giá chạm vùng Entry BB+ATR **ĐỒNG THỜI** $RSI \ge 70$ (Quá Mua) hoặc $RSI \le 30$ (Quá Bán).
-* 🔥🔥🔥 **Tier 3 (3 Đốm Lửa - VIP):** Tín hiệu xác suất cực cao khi có thêm **Quét Thanh Khoản Thật (True Liquidity Sweep / SFP)** khung M15 rút râu nến đảo chiều.
+### 🔥 Hệ thống phân cấp 5 mức (Tier 0 → Tier 3 VIP)
+* 🔔 **Tier 0:** Chạm dải `BB Upper` / `BB Lower` thông thường.
+* 🔥 **Tier 1:** Khớp vùng Entry mở rộng `BB Upper + ATR` (SELL) hoặc `BB Lower - ATR` (BUY).
+* 🔥🔥 **Tier 2A:** Khớp `BB ± ATR` **VÀ** `RSI(14) >= 70` (SELL) hoặc `RSI(14) <= 30` (BUY).
+* 🔥🔥 **Tier 2B:** Xuất hiện **nến rút râu từ chối M5** (Pinbar hoặc nến đảo chiều thuận màu) ngay tại biên `BB Upper` / `BB Lower` *(không bắt buộc phải chạm `BB ± ATR`; Entry tại biên BB, SL = 1 ATR từ biên BB)*.
+* 🔥🔥🔥 **Tier 3 (VIP):** Khớp `BB ± ATR` **VÀ** xuất hiện **nến rút râu từ chối M5** ngay tại mốc `BB ± ATR`.
 
-### ⌨️ Các lệnh điều khiển
-* `/bbatr` hoặc `/bb`: Mở dashboard chiến lược khung M5.
-* `/bbatr on`: Bật nhận cảnh báo tự động.
-* `/bbatr off`: Tắt nhận cảnh báo.
-* `/bbatr bias buy`: Chỉ lọc kèo BUY.
-* `/bbatr bias sell`: Chỉ lọc kèo SELL.
-* `/bbatr bias both`: Nhận cả 2 chiều.
-* `/bbatr btc`: Xem bảng đo BB+ATR cho Bitcoin M5.
-* `/bbatr alert eth 15m`: Đặt cảnh báo riêng cho ETH khung 15m.
-* `/bbatr list`: Xem danh sách cảnh báo cá nhân.
-* `/bbatr del 3`: Xóa cảnh báo cá nhân mang số ID 3.
+> Chi tiết công thức lọc nến rút râu M5 (`totalRange >= 0.5 ATR`, `wick >= 0.25 ATR`, `closePos`, Dạng A/B, chống rút râu ảo ≥ 80% thời gian nến M5) xem tại **[TIER_SYSTEM.md](TIER_SYSTEM.md)**.
+
+### 🎛 Các nút bấm trên Dashboard `/bbatr`
+* `🔄 Làm Mới Dữ Liệu` | `🔔 Bật / 🔕 Tắt Cảnh Báo XAU M5`
+* Bộ lọc Daily Bias: `🟢 Chỉ Buy` | `🔴 Chỉ Sell` | `⚖️ Cả 2 chiều`
+* Đổi khung xem nhanh: `M5` | `M15` | `H1` | `H4`
+* `🔥 Tier 3 (Rút Râu M5): ✅ BẬT / ❌ TẮT` | `ℹ️ Hướng Dẫn`
 
 ---
 
-## 3. Chiến lược 2: Nadaraya-Watson Envelope + SMC Order Blocks (Cung/Cầu)
+## 3. Chiến lược 2: Nadaraya-Watson Envelope (NWE) + SMC Order Blocks Chéo Khung
 
-Chiến lược kết hợp toán học làm mượt phi tuyến tính (Kernel Regression) với trường phái Dòng Tiền Thông Minh (Smart Money Concepts).
+Kết hợp đường hồi quy hạt nhân **Gaussian Kernel Regression** (`h=8, mult=3.0`) với các khối **Order Block (Supply / Demand)** chưa bị triệt tiêu theo **hệ thống 3 tầng đồng bộ**:
 
-### 📐 Thuật toán áp dụng
-1. **Nadaraya-Watson Envelope (NWE)** ($h=8, \text{mult}=3.0$):
-   - Đường cong trung tâm được tính bằng trọng số Kernel Gaussian:
-     $$w_i = \exp\left(-\frac{i^2}{2h^2}\right)$$
-   - Biên bao ngoài tính dựa trên độ lệch tuyệt đối trung bình ($MAE \times 3.0$).
-   - **Dynamic S/R:** Tự động bắt các đỉnh dao động (Swing Highs) làm Kháng cự động và đáy dao động (Swing Lows) làm Hỗ trợ động.
-2. **Order Blocks (SMC Demand & Supply)**:
-   - **Vùng Cầu (Demand Zone / Bullish OB):** Khối nến giảm cuối cùng trước nhịp tăng mạnh phá vỡ cấu trúc đỉnh cũ.
-   - **Vùng Cung (Supply Zone / Bearish OB):** Khối nến tăng cuối cùng trước nhịp giảm mạnh xả hàng phá vỡ đáy cũ.
-   - **Lọc Unmitigated:** Tự động loại bỏ các khối OB đã bị giá triệt tiêu.
-3. **Tín hiệu Hợp lưu Siêu cấp (Confluence Alert)**:
-   - 🚨🟢🟢 **Hợp lưu MUA:** Giá chạm đồng thời **Dải dưới NWE** + **Vùng Cầu (Bullish OB)**.
-   - 🚨🔴🔴 **Hợp lưu BÁN:** Giá chạm đồng thời **Dải trên NWE** + **Vùng Cung (Bearish OB)**.
+### 🔥 Hệ thống 3 tầng SMC + NWE
+* 🔔 **Tier 1 (Đơn khung):** Chạm biên NWE đơn lẻ hoặc chạm khối OB đơn lẻ trên từng khung `M5, M15, M30, H1, H4, D1`.
+* 🔥🔥 **Tier 2 (MTF Confluence — Hợp lưu Chéo Khung):**
+  - Giá chạm dải biên **NWE khung H1** (`Upper Band` / `Lower Band`) **ĐỒNG THỜI** giao cắt ít nhất 1 khối **Order Block** chưa triệt tiêu thuộc các khung **`M15`, `M30`, `H1`, `H4`**.
+  - Nếu giao cắt nhiều OB cùng lúc, bot liệt kê tất cả các khối và ưu tiên khối khung lớn nhất làm khối chính (`H4 > H1 > M30 > M15`).
+  - Tự động chống bắn trùng với cảnh báo hợp lưu đơn khung `H1` cũ.
+* 🔥🔥🔥 **Tier 3 (VIP — MTF + Nến Rút Râu Khung M15):**
+  - Thỏa điều kiện Tier 2 **VÀ** xuất hiện **nến rút râu từ chối khung M15** (lọc theo **`ATR(14)` khung M15**).
+  - Cho phép xác nhận rút râu ngay **bên trong lòng OB rộng** (miễn giá đóng nến không phá vỡ `ob.top` với SELL / `ob.bottom` với BUY), kèm bộ lọc chống rút râu ảo (≥ phút thứ 12 của nến M15 hoặc nến M15 vừa đóng).
 
-### 🎛 Bảng Dashboard & Menu Cài Đặt Riêng Biệt (Tách biệt NWE và OB)
-
-Hệ thống đã tách riêng thành 2 bảng Dashboard độc lập, trực quan và dễ theo dõi:
-
-#### 🌊 Bảng 1: Nadaraya-Watson Envelope (`/nwe`)
-* **Lệnh mở bảng:** `/nwe` (hoặc `/envelope`)
-* **Xem theo từng khung thời gian:** `/nwe m5`, `/nwe m15`, `/nwe h1`, `/nwe h4`, `/nwe d1`
-* **Bật/Tắt nhanh cảnh báo:** `/nwe on` | `/nwe off`
-* **Giao diện nút bấm trực tiếp trên Telegram:**
-  - `🔄 Làm Mới Dữ Liệu` | `🔔 Bật / 🔕 Tắt Cảnh Báo NWE`
-  - Chọn khung xem ngay: `M5` | `M15` | `H1` | `H4` | `D1`
-  - Bật/Tắt nhận tin độc lập từng khung: `Báo M5`, `Báo M15`, `Báo M30`, `Báo H1`, `Báo H4`, `Báo D1`
-  - `🔥 Tier 2 (Quét TK): ✅ BẬT` / `❌ TẮT`
-  - `ℹ️ Hướng Dẫn NWE`
-
-#### 🧱 Bảng 2: SMC Order Blocks - Vùng Cung & Cầu (`/ob`)
-* **Lệnh mở bảng:** `/ob` (hoặc `/smc`, `/orderblock`, `/zone`)
-* **Xem theo từng khung thời gian:** `/ob m5`, `/ob m15`, `/ob h1`, `/ob h4`, `/ob d1`
-* **Bật/Tắt nhanh cảnh báo:** `/ob on` | `/ob off`
-* **Giao diện nút bấm trực tiếp trên Telegram:**
-  - `🔄 Làm Mới Dữ Liệu` | `🔔 Bật / 🔕 Tắt Cảnh Báo OB`
-  - Chọn khung xem ngay: `M5` | `M15` | `H1` | `H4` | `D1`
-  - Bật/Tắt nhận tin độc lập từng khung: `Báo M5`, `Báo M15`, `Báo M30`, `Báo H1`, `Báo H4`, `Báo D1`
-  - `🔥 Tier 2 (Quét TK): ✅ BẬT` / `❌ TẮT`
-  - `ℹ️ Hướng Dẫn OB`
+### 🎛 2 bảng Dashboard độc lập trên Telegram
+* **Dashboard NWE (`/nwe`):** Chọn khung xem (`M5, M15, H1, H4, D1`), bật/tắt nhận tin riêng từng khung (`M5–D1`), nút `🔥 Tier 3 (Rút Râu M15)`, nút `ℹ️ Hướng Dẫn NWE`.
+* **Dashboard Order Blocks (`/ob`):** Hiển thị danh sách Supply/Demand OB chưa triệt tiêu và khoảng cách hiện tại, bật/tắt nhận tin riêng từng khung (`M5–D1`), nút `🔥 Tier 3 (Rút Râu M15)`, nút `ℹ️ Hướng Dẫn OB`.
 
 ---
 
-## 4. Hệ thống Phân cấp Cảnh báo: TIER 1, TIER 2, TIER 3 (Quét Thanh Khoản)
+## 4. Công tắc VIP Tier 3 & Quyền nhận tin
 
-Hệ thống tự động phân loại tất cả các tín hiệu vào lệnh thành các cấp độ cảnh báo rõ rệt:
-
-### 🔔 Cảnh báo Thường: Chạm Dải Biên Bollinger Bands
-* Giá chạm dải biên trên `Bands(20) Upper` hoặc dải biên dưới `Bands(20) Lower`.
-* Header thông báo chuông: `🔔 CẢNH BÁO: GIÁ CHẠM DẢI BOLLINGER BANDS`.
-* Dành cho trader theo dõi biến động sớm của thị trường.
-
-### 🔥 Tier 1 (1 Đốm Lửa): Khớp Vùng Entry BB + ATR
-* Giá bung chạm/vượt ngưỡng Entry mở rộng kiệt sức của dải Bollinger Bands kết hợp ATR(14):
-  - **Bán (Sell Entry):** Giá $\ge \text{Bands(20) Upper} + \text{ATR}(14)$
-  - **Mua (Buy Entry):** Giá $\le \text{Bands(20) Lower} - \text{ATR}(14)$
-* Header thông báo: `🔥 [TIER 1] KHỚP VÙNG ENTRY BB + ATR (BOLLINGER BANDS + ATR)`.
-* Biên độ tăng/giảm bị kéo dãn cực độ (Overbought/Oversold Exhaustion).
-
-### 🔥🔥 Tier 2 (2 Đốm Lửa): Hợp Lưu BB + ATR + RSI Cực Trị
-* Giá chạm vùng Entry BB+ATR **ĐỒNG THỜI** xung lượng đảo chiều RSI(14) đạt ngưỡng cực đại:
-  - **Bán:** Giá $\ge \text{BB Upper} + \text{ATR}$ **VÀ** $RSI(14) \ge 70$ (Quá Mua)
-  - **Mua:** Giá $\le \text{BB Lower} - \text{ATR}$ **VÀ** $RSI(14) \le 30$ (Quá Bán)
-* Header thông báo: `🔥🔥 [TIER 2] HỢP LƯU ENTRY (BB + ATR) + RSI QUÁ MUA / QUÁ BÁN`.
-* Xác suất đảo chiều cực cao khi cả biên độ và chỉ báo xung lượng cùng đồng pha!
-
-### 🔥🔥🔥 Tier 3 (3 Đốm Lửa - VIP): Xác suất Tối Thượng (Quét Thanh Khoản Thật / SFP)
-* Tự động kích hoạt khi nến tín hiệu **vừa thực hiện cú quét thanh khoản thật (True Liquidity Sweep)** trên cấu trúc bể thanh khoản M15 (BSL / SSL hoặc EQH / EQL):
-  - **Quét Đáy (SSL Sweep -> Canh BUY):** Nến đâm thủng đáy cũ M15 nhưng rút râu ngược lên đóng cửa bên trên.
-  - **Quét Đỉnh (BSL Sweep -> Canh SELL):** Nến bung vượt đỉnh cũ M15 nhưng rút râu ngược xuống đóng cửa bên dưới.
-  - **Độ sâu quét hợp lệ:** Chuẩn từ $0.1 \times ATR$ đến $1.5 \times ATR$ (loại trừ chạm nhẹ hoặc nến xả gãy cấu trúc).
-  - **Tỷ lệ râu nến:** Râu nến đảo chiều chiếm $\ge 40\%$ tổng chiều dài cây nến.
-* **Gợi ý Stop Loss tối ưu:** Đặt an toàn ngay sau râu nến quét:
-  - BUY: $SL = \text{Candle Low} - 0.2 \times ATR(14)$
-  - SELL: $SL = \text{Candle High} + 0.2 \times ATR(14)$
-* **Tỷ lệ thắng (Winrate) và R:R của Tier 3 vượt trội nhất hệ thống!** Tự động phát cảnh báo VIP cho người dùng kể cả khi tắt cảnh báo thông thường!
+* Lệnh `/tier3` (hoặc `/tier2`, `/sweep`, `/sfp`) bật/tắt riêng **cảnh báo VIP Tier 3** cho cả **BB+ATR (Rút râu M5)** lẫn **SMC+NWE (Rút râu M15)**.
+* **Lưu ý quan trọng:**
+  - Khi tắt `/bbatr off`, bot tắt cả cụm **Tier 0 + Tier 1 + Tier 2A + Tier 2B**, chỉ giữ lại **Tier 3 VIP** (nếu nút Tier 3 đang BẬT).
+  - Bộ lọc Daily Bias (`/bbatr buy` / `sell`) áp dụng cho **Tier 0, 1, 2A, 2B**, không chặn **Tier 3 VIP**.
 
 ---
 
 ## 5. Cảnh báo Giá chạm tức thì (Vàng & Crypto)
 
-Bot theo dõi liên tục giá thị trường thời gian thực (real-time) và phát thông báo ngay lập tức khi giá thị trường chạm hoặc vượt ngưỡng kỳ vọng của bạn.
-
-### ⌨️ Cú pháp đặt lệnh
 ```bash
 /alert <MÃ> <GIÁ_MỤC_TIÊU>
 ```
 
-### 💡 Ví dụ cụ thể
-* **Vàng (XAU/USD):**
-  - `/alert xau 4200` *(Báo khi giá Vàng chạm mốc $4,200)*
-  - `/alert gold 3550.5`
-* **Crypto (Bitcoin, Ethereum, Altcoins):**
-  - `/alert btc 95000` hoặc `/alert btc 95k`
-  - `/alert eth 3600`
-  - `/alert sol 220`
-  - `/alert pepe 0.000015`
-
-### 📋 Quản lý cảnh báo
-* `/alerts` hoặc `/alert list`: Liệt kê các lệnh đang chờ khớp kèm ID.
-* `/alert del <ID>`: Hủy 1 lệnh (VD: `/alert del 5`).
-* `/alert clear` hoặc `/alert del all`: Xóa toàn bộ danh sách đang chờ.
+* **Ví dụ:** `/alert xau 3650`, `/alert gold 3580.5`, `/alert btc 95k`, `/alert eth 3600`, `/alert sol 220`, `/alert pepe 0.000015`.
+* **Quản lý:** `/alerts` (xem danh sách + nút xóa nhanh), `/alert del <ID>`, `/alert clear`.
 
 ---
 
 ## 6. Theo dõi & Cài đặt Cảnh báo RSI Vàng đa khung
 
-Theo dõi xung lượng giá Vàng (XAU/USD) theo chu kỳ RSI(14) trên 7 khung thời gian: `M1`, `M5`, `M15`, `M30`, `H1`, `H4`, `D1`.
-
-### ⌨️ Các lệnh điều khiển
-* `/gold` hoặc `/xau`: Hiển thị bảng tổng hợp giá hiện tại và chỉ số RSI của cả 7 khung thời gian.
-* `/goldalert` hoặc `/xaualert`: Mở menu cài đặt cảnh báo RSI:
-  - **Nút Master:** Bật/Tắt toàn bộ nhận tin RSI Vàng.
-  - **Nút chọn khung:** Bật/Tắt từng khung từ M1 đến D1.
-  - **Nút chọn bộ ngưỡng:**
-    - `70 / 30`: Ngưỡng chuẩn quốc tế.
-    - `75 / 25`: Bộ lọc giảm bớt nhiễu trong thị trường biến động mạnh.
-    - `80 / 20`: Bắt đỉnh/đáy cực trị.
+* `/gold` (hoặc `/xau`): Bảng giá Vàng & chỉ số `RSI(14)` 7 khung `M1, M5, M15, M30, H1, H4, D1`.
+* `/goldalert` (hoặc `/xaualert`): Bật/tắt master, chọn từng khung thời gian và chọn preset ngưỡng `70/30`, `75/25` hoặc `80/20`.
 
 ---
 
 ## 7. Lịch Kinh tế Vĩ mô & Tin tức nóng (CPI / NFP / FED)
 
-Hệ thống kết nối nguồn dữ liệu lịch kinh tế ForexFactory với cơ chế **Adaptive Fast Polling** (tăng tốc độ quét lên mỗi 3-4 giây khi bước vào khung giờ vàng ra tin).
-
-### ⌨️ Các lệnh điều khiển
-* `/calendar` hoặc `/macro`: Xem danh sách tất cả các sự kiện kinh tế công bố trong ngày (giờ Việt Nam), bao gồm số liệu:
-  - **Previous (Kỳ trước)**
-  - **Forecast (Dự báo của chuyên gia)**
-  - **Actual (Số liệu thực tế vừa công bố)**
-* `/settings`: Mở menu cài đặt mức độ ảnh hưởng của tin tức muốn nhận cảnh báo:
-  - 🔴 **Tin Đỏ (High Impact):** CPI, PPI, Non-Farm Payrolls (NFP), Tuyên bố lãi suất FOMC, Tỷ lệ thất nghiệp...
-  - 🟠 **Tin Cam (Medium Impact):** PMI sản xuất/dịch vụ, Doanh số bán lẻ, Niềm tin người tiêu dùng...
-  - 🟡 **Tin Vàng (Low Impact):** Các báo cáo phụ trợ.
+* `/calendar` (hoặc `/macro`): Lịch sự kiện kinh tế hôm nay (giờ Việt Nam) kèm số liệu `Actual / Forecast / Previous`.
+* `/settings`: Chọn mức độ ảnh hưởng muốn nhận thông báo: 🔴 Cao (`High`), 🟠 Trung bình (`Medium`), 🟡 Thấp (`Low`).
+* **Adaptive Fast Polling:** Tự động tăng tốc quét lên **4 giây/lần** khi sắp đến giờ công bố tin quan trọng (30 giây/lần ngoài khung giờ tin).
 
 ---
 
-## 8. Expert Advisor trên MetaTrader 5 (MT5 EA)
+## 8. MetaTrader 5 Expert Advisors (MT5 EA) & Webhook
 
-Mã nguồn EA đã được tích hợp sẵn trong thư mục `mt5/` của dự án để bạn có thể gắn trực tiếp vào MT5:
+Endpoint nhận tín hiệu trực tiếp từ MT5: `POST /api/webhook/bbatr` (`src/indicator/bb-atr-webhook.controller.ts`).
 
-1. **`mt5/BB_ATR_Live_Alert.mq5`**:
-   - EA chuyên dụng chạy trên biểu đồ MT5, hiển thị trực quan dải Bands(20) Upper/Lower và ngưỡng Entry $\pm 1 \times ATR(14)$.
-   - Phát âm thanh cảnh báo (Alert sound) và Push Notification về điện thoại khi giá chạm vùng Entry.
-2. **`mt5/BB_ATR_AutoTrader.mq5`**:
-   - EA tự động hóa đặt lệnh (Auto Trading) theo chiến lược BB+ATR:
-   - Tự động tính khối lượng Lot theo % rủi ro tài khoản (Risk Management).
-   - Tự động đặt Stop Loss ($1 \times ATR$) và Take Profit (Middle Band hoặc Tỷ lệ 1:2 R:R).
-   - Tích hợp Trailing Stop và hòa vốn (Breakeven).
+Thư mục `mt5/` đi kèm 2 EA:
+1. **`mt5/BB_ATR_Live_Alert.mq5`**: Tính BB(20), ATR(14), RSI(14) trực tiếp theo báo giá sàn MT5 của bạn và bắn Webhook HTTP POST về Telegram Bot với độ trễ 0ms.
+2. **`mt5/BB_ATR_AutoTrader.mq5`**: EA tự động hóa giao dịch theo chiến lược BB+ATR (tính Lot theo % rủi ro, đặt SL = 1 ATR, TP1/TP2, Trailing/Breakeven) và bắn thông báo khớp lệnh qua Webhook về Telegram.
 
 ---
 
-## ⚙️ Cơ chế hoạt động nền tảng
-* **Độ trễ thấp:** Dữ liệu nến và giá được cập nhật liên tục thông qua kết nối trực tiếp, loại bỏ độ trễ.
-* **Chống spam cảnh báo (Anti-spam Cooldown):** Khi giá chạm vùng, bot gửi cảnh báo ngay lập tức và tự động kích hoạt bộ đếm cooldown (2 - 3 phút) để tránh tình trạng spam tin nhắn liên tục khi nến rút râu nhiều lần trong 1 vùng hẹp.
-* **Tự phục hồi dữ liệu:** Cấu hình người dùng được lưu an toàn vào PostgreSQL database qua Prisma ORM, đồng thời luôn có bộ đệm In-Memory fallback đảm bảo cảnh báo không bao giờ bị gián đoạn.
+## ⚙️ Cơ chế vận hành & An toàn hệ thống
+* **Pure Signal Engines:** Toàn bộ logic phân loại Tier của BB+ATR (`src/indicator/signal-classifier.ts`) và SMC+NWE (`src/smc/smc-mtf-classifier.ts`) được tách thành pure functions độc lập, sẵn sàng cho unit test và backtest.
+* **Chống Race Condition:** Khóa Mutex cho cả vòng quét BB+ATR (WebSocket vs Cron 3s) và vòng quét SMC/NWE (Cron 15s).
+* **Broadcast song song:** Gửi tin nhắn Telegram theo batch **25 users/lượt** bằng `Promise.allSettled()`, loại bỏ nghẽn cổ chai khi đông người dùng.
+* **Chịu lỗi DB:** Lưu cấu hình & lịch sử cảnh báo trên PostgreSQL qua Prisma ORM kèm retry tự động và bộ nhớ đệm In-Memory fallback.
