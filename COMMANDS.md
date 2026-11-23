@@ -2,7 +2,8 @@
 
 > **Hệ thống Bot:** Cảnh báo Giao dịch Tài chính, Vĩ mô, Bollinger Bands (20) + ATR (14) + RSI (14), Nadaraya-Watson Envelope (NWE) & Smart Money Concepts (SMC Order Blocks Chéo Khung).  
 > **Tài sản trọng tâm:** Vàng (`XAU/USD`), Crypto (`BTC`, `ETH`, `SOL`, ...), Ngoại hối & Tin tức Kinh tế Vĩ mô.  
-> **Chi tiết công thức từng Tier:** Xem đầy đủ tại 👉 **[TIER_SYSTEM.md](TIER_SYSTEM.md)**
+> **Chi tiết công thức từng Tier:** Xem đầy đủ tại 👉 **[TIER_SYSTEM.md](TIER_SYSTEM.md)**  
+> **Hướng dẫn gọi điện báo thức Telegram (CallMeBot):** Xem từng bước tại 👉 **[CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md)**
 
 ---
 
@@ -41,6 +42,7 @@
 | | `/ob <khung>` | `/ob m5`, `/ob m15`, `/ob h1`, `/ob h4` | Xem các khối Supply/Demand OB còn hiệu lực theo khung. |
 | | `/ob on` / `/ob off` | `/smc on`, `/smc off` | Bật / Tắt cảnh báo tự động Order Block. |
 | **VIP Tier 3** | `/tier3` | `/tier2`, `/sweep`, `/sfp` | Bật / Tắt riêng cảnh báo **Tier 3 VIP** (Rút râu M5 của BB+ATR & Rút râu M15 của SMC+NWE). |
+| **Gọi báo thức** | `/testcall` | `/calltest`, `/testcall smc`, `/testcall buy` | Kích hoạt cuộc gọi điện báo thức thử qua **CallMeBot** (test kịch bản `TIER SSS` hoặc `SMC+NWE Tier 3`). Xem hướng dẫn tại **[CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md)**. |
 | **Cảnh báo Giá** | `/alert <mã> <giá>` | `/canhbao`, `/pricealert` | Đặt cảnh báo chạm giá tức thì (VD: `/alert xau 3650`, `/alert btc 95k`). |
 | | `/alerts` | `/alert list`, `/dsalert` | Xem và quản lý các cảnh báo giá đang chờ khớp. |
 | | `/alert del <id>` | `/alert remove <id>`, `/alert xoa <id>` | Hủy 1 cảnh báo giá theo ID. |

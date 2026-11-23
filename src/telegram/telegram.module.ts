@@ -6,6 +6,7 @@ import { GoldModule } from '../gold/gold.module';
 import { AlertModule } from '../alert/alert.module';
 import { IndicatorModule } from '../indicator/indicator.module';
 import { SmcModule } from '../smc/smc.module';
+import { SuperTierModule } from '../common/super-tier.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { SmcModule } from '../smc/smc.module';
     forwardRef(() => AlertModule),
     forwardRef(() => IndicatorModule),
     forwardRef(() => SmcModule),
+    forwardRef(() => SuperTierModule),
   ],
   providers: [TelegramService],
   exports: [TelegramService],

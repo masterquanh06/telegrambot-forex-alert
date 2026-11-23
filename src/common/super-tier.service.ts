@@ -1,6 +1,7 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramService } from '../telegram/telegram.service';
+import { CallMeBotService } from './callmebot.service';
 import {
   evaluateTierSss,
   shouldSuppressDuplicateSss,
@@ -33,6 +34,8 @@ export class SuperTierService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
+    @Optional()
+    private readonly callMeBotService?: CallMeBotService,
   ) {}
 
   registerActiveChat(chatId: string) {
@@ -129,6 +132,21 @@ export class SuperTierService {
       this.logger.log(
         `👑💎🔥🔥🔥 [TIER SSS ALERT] ${result.direction} XAU/USD tại $${result.entryPrice.toFixed(2)} (SL an toàn: $${result.safestSl.toFixed(2)} | Độ trễ: ${result.timeDiffMinutes} phút) -> Đã gửi tới ${sentCount} người dùng VIP.`,
       );
+
+      // Gọi điện báo thức Telegram qua CallMeBot ngay khi đạt TIER SSS
+      if (this.callMeBotService) {
+        this.callMeBotService
+          .triggerVoiceCall({
+            reason: 'TIER_SSS',
+            direction: result.direction,
+            price: result.entryPrice,
+            slPrice: result.safestSl,
+          })
+          .catch((err) => {
+            this.logger.warn(`Lỗi kích hoạt CallMeBot TIER SSS: ${err.message}`);
+          });
+      }
+
       return true;
     }
 

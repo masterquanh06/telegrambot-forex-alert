@@ -20,6 +20,7 @@ import {
   SMC_MTF_OB_TIMEFRAMES,
 } from './smc-mtf-classifier';
 import { SuperTierService } from '../common/super-tier.service';
+import { CallMeBotService } from '../common/callmebot.service';
 
 @Injectable()
 export class SmcService implements OnModuleInit, OnModuleDestroy {
@@ -106,6 +107,8 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     private readonly telegramService: TelegramService,
     @Optional()
     private readonly superTierService?: SuperTierService,
+    @Optional()
+    private readonly callMeBotService?: CallMeBotService,
   ) {}
 
   onModuleInit() {
@@ -1326,35 +1329,55 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
             } catch (e) {}
 
             // Báo cáo sự kiện Tier 3 sang SuperTierService để đánh giá Siêu Hợp Lưu TIER SSS
-            if (isTier3 && this.superTierService) {
+            // Nếu TIER SSS vừa kích hoạt, SuperTierService đã gọi CallMeBot mức cao nhất -> không gọi trùng SMC Tier 3
+            if (isTier3) {
               const smcSlBuffer = Number((0.5 * payload.atrM15).toFixed(2));
               const smcSl =
                 payload.direction === 'SELL'
                   ? Number((payload.primaryOb.top + smcSlBuffer).toFixed(2))
                   : Number((payload.primaryOb.bottom - smcSlBuffer).toFixed(2));
 
-              this.superTierService
-                .reportTier3Event({
-                  source: 'SMC_NWE',
-                  direction: payload.direction,
-                  triggeredAtMs: now,
-                  candleTimeMs: payload.rejectionCandleTime ?? candleTime,
-                  currentPrice: payload.currentPrice,
-                  slPrice: smcSl,
-                  tp1Price: payload.nweH1.kernel,
-                  tp2Price: payload.nweH1.kernel,
-                  summary: payload.signalReason,
-                  details: {
-                    nweH1: payload.nweH1,
-                    primaryOb: payload.primaryOb,
-                    matchedOrderBlocks: payload.matchedOrderBlocks,
-                    confluenceLevel: payload.confluenceLevel,
-                    atrM15: payload.atrM15,
-                  },
-                })
-                .catch((err) => {
+              let sssTriggered = false;
+              if (this.superTierService) {
+                try {
+                  sssTriggered = await this.superTierService.reportTier3Event({
+                    source: 'SMC_NWE',
+                    direction: payload.direction,
+                    triggeredAtMs: now,
+                    candleTimeMs: payload.rejectionCandleTime ?? candleTime,
+                    currentPrice: payload.currentPrice,
+                    slPrice: smcSl,
+                    tp1Price: payload.nweH1.kernel,
+                    tp2Price: payload.nweH1.kernel,
+                    summary: payload.signalReason,
+                    details: {
+                      nweH1: payload.nweH1,
+                      primaryOb: payload.primaryOb,
+                      matchedOrderBlocks: payload.matchedOrderBlocks,
+                      confluenceLevel: payload.confluenceLevel,
+                      atrM15: payload.atrM15,
+                    },
+                  });
+                } catch (err: any) {
                   this.logger.warn(`Lỗi báo cáo SMC Tier 3 sang SuperTierService: ${err.message}`);
-                });
+                }
+              }
+
+              // Nếu chưa đạt TIER SSS -> gọi điện CallMeBot cho SMC/NWE Tier 3
+              if (!sssTriggered && this.callMeBotService) {
+                const tfList = Array.from(matchedObTfs).join(' ');
+                this.callMeBotService
+                  .triggerVoiceCall({
+                    reason: 'SMC_TIER_3',
+                    direction: payload.direction,
+                    price: payload.currentPrice,
+                    slPrice: smcSl,
+                    detailText: `khung ${tfList}`,
+                  })
+                  .catch((err) => {
+                    this.logger.warn(`Lỗi kích hoạt CallMeBot SMC Tier 3: ${err.message}`);
+                  });
+              }
             }
 
             return { mtfActive: true, triggered: true };

@@ -151,6 +151,7 @@ Hệ thống SMC + NWE được thiết kế đồng bộ **3 tầng rõ ràng (
   - **SL an toàn nhất:** `Math.max(SL_BB_ATR, SL_SMC_NWE)` với SELL; `Math.min(SL_BB_ATR, SL_SMC_NWE)` với BUY.
   - **TP1:** `BB Middle (M5)` | **TP2:** `NWE H1 Kernel`.
 - **Chống spam & Phân quyền:** Chặn trùng cặp `(bbCandleTimeMs, smcCandleTimeMs)` hoặc cooldown **15 phút cùng chiều**; gửi song song batch 25 users tới toàn bộ VIP subscribers (`tier2AlertEnabled !== false`).
+- **Gọi điện báo thức Telegram (CallMeBot):** Tự động gọi điện thoại Telegram (đọc giọng tiếng Việt `vi-VN-Standard-A`) **CHỈ cho 2 trường hợp**: **TIER SSS** và **SMC+NWE Tier 3** (nếu SMC Tier 3 đồng thời kích hoạt TIER SSS thì chỉ gọi 1 cuộc TIER SSS, không gọi trùng). Cấu hình trong `.env`: `CALLMEBOT_ENABLED=true`, `CALLMEBOT_USERS=@username` (nhớ nhắn `/start` 1 lần với `@CallMeBot_txtbot` trước).
 
 ---
 

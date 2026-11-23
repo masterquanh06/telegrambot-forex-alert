@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit, OnModuleDestroy, Inject, Optional, forwardRef } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Telegraf, Markup } from 'telegraf';
 import { WatchlistService } from '../watchlist/watchlist.service';
@@ -7,6 +7,7 @@ import { GoldService } from '../gold/gold.service';
 import { AlertService } from '../alert/alert.service';
 import { BbAtrService } from '../indicator/bb-atr.service';
 import { SmcService } from '../smc/smc.service';
+import { CallMeBotService } from '../common/callmebot.service';
 import { UserXauSettings, XauTimeframe } from '../gold/gold.interface';
 import { UserSmcSettings, SmcTimeframe } from '../smc/smc.interface';
 
@@ -26,6 +27,9 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     private readonly bbAtrService: BbAtrService,
     @Inject(forwardRef(() => SmcService))
     private readonly smcService: SmcService,
+    @Optional()
+    @Inject(forwardRef(() => CallMeBotService))
+    private readonly callMeBotService?: CallMeBotService,
   ) {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
     if (!token) {
@@ -108,6 +112,7 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 📋 <b>DANH SÁCH CÁC LỆNH TÍNH NĂNG:</b>
 👑 <b>TIER SSS (Siêu Hợp Lưu):</b> Tự động kích hoạt khi <b>BB+ATR M5 (Tier 3)</b> và <b>SMC/NWE M15 (Tier 3)</b> cùng chiều trong cửa sổ 20 phút!
 🔥 <code>/tier3</code> (hoặc <code>/tier2</code>, <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo VIP Tier 3 &amp; Tier SSS
+📞 <code>/testcall</code> (hoặc <code>/calltest</code>) - Test gọi điện báo thức Telegram qua CallMeBot (<code>/testcall</code> hoặc <code>/testcall smc</code>)
 🌊 <code>/nwe</code> (hoặc <code>/envelope</code>) - Bảng Dashboard Nadaraya-Watson Envelope (NWE + Cản động)
 🧱 <code>/ob</code> (hoặc <code>/smc</code>, <code>/orderblock</code>) - Bảng Dashboard SMC Order Blocks (Vùng Cung/Cầu)
 🎯 <code>/bbatr</code> (hoặc <code>/bb</code>) - Chiến lược Bollinger Bands(20) + ATR(14) khung M5
@@ -1025,6 +1030,88 @@ Gõ lệnh theo cú pháp:
           ],
         ]),
       );
+    });
+
+    // 11. Lệnh /testcall hoặc /calltest - Kích hoạt cuộc gọi điện báo thức thử qua CallMeBot
+    this.bot.command(['testcall', 'calltest'], async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      const username = ctx.from?.username || ctx.from?.first_name;
+      await this.watchlistService.registerUser(chatId, username);
+
+      if (!this.callMeBotService) {
+        return ctx.replyWithHTML(
+          '⚠️ <b>CallMeBotService chưa được khởi tạo.</b>\nVui lòng khởi động lại bot backend.',
+        );
+      }
+
+      const escapeHtml = (s: string) =>
+        s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+      const users = this.callMeBotService.getConfiguredUsers();
+      if (users.length === 0) {
+        return ctx.replyWithHTML(
+          '⚠️ <b>Chưa cấu hình CallMeBot trong file <code>.env</code>!</b>\n\n' +
+            'Hãy thêm các biến sau vào file <code>.env</code> (dùng <b>@username cá nhân Telegram</b> của bạn, KHÔNG dùng username của bot):\n' +
+            '<code>CALLMEBOT_ENABLED=true\nCALLMEBOT_USERS=@username_cua_ban\nCALLMEBOT_LANG=vi-VN-Standard-A\nCALLMEBOT_REPEAT=2</code>\n\n' +
+            'Sau đó khởi động lại bot (<code>npm run start:dev</code>) và thử lại <code>/testcall</code>.\n' +
+            '<i>📖 Xem hướng dẫn từng bước tại file <code>CALLMEBOT_SETUP.md</code> trong repo.</i>',
+        );
+      }
+
+      const text = ctx.message.text.trim();
+      const args = text
+        .split(/\s+/)
+        .slice(1)
+        .map((a) => a.toLowerCase());
+
+      const isSmc = args.some((a) => ['smc', 'ob', 'nwe', 'tier3'].includes(a));
+      const direction: 'BUY' | 'SELL' = args.some((a) => ['buy', 'long', 'mua'].includes(a))
+        ? 'BUY'
+        : 'SELL';
+      const reason = isSmc ? 'SMC_TIER_3' : 'TIER_SSS';
+      const reasonLabel = isSmc ? 'SMC + NWE TIER 3' : 'TIER SSS (Siêu Hợp Lưu)';
+      const price = 3620.5;
+      const slPrice = direction === 'SELL' ? 3632.0 : 3609.0;
+      const detailText = isSmc ? 'khung H1 M15' : undefined;
+      const usersSafe = users.map(escapeHtml).join(', ');
+
+      await ctx.replyWithHTML(
+        `📞 <b>Đang kích hoạt cuộc gọi thử CallMeBot...</b>\n` +
+          `• Kịch bản: <b>${reasonLabel}</b> (${direction})\n` +
+          `• Người nhận: <code>${usersSafe}</code>\n` +
+          `<i>⏳ Chờ khoảng 3–10 giây để điện thoại / Telegram đổ chuông...</i>`,
+      );
+
+      try {
+        const calledCount = await this.callMeBotService.triggerVoiceCall({
+          reason,
+          direction,
+          price,
+          slPrice,
+          detailText,
+          bypassCooldown: true,
+        });
+
+        if (calledCount > 0) {
+          return ctx.replyWithHTML(
+            `✅ <b>Đã gửi lệnh gọi điện thành công (${calledCount}/${users.length} tài khoản)!</b>\n\n` +
+              `💡 <b>Nếu không thấy đổ chuông, kiểm tra 3 điểm sau:</b>\n` +
+              `1️⃣ Đã thêm <code>@CallMeBot_API</code> (tài khoản người dùng, KHÔNG phải bot) vào <b>Contacts</b> và bấm <b>Message</b> gửi <code>hi</code>.\n` +
+              `2️⃣ Telegram → <i>Settings → Privacy and Security → Calls</i> không để <code>Nobody</code>.\n` +
+              `3️⃣ Biến <code>CALLMEBOT_USERS</code> là <code>@username</code> cá nhân của bạn.\n\n` +
+              `<i>🧪 Mẹo: Dùng <code>/testcall</code> (test Tier SSS) hoặc <code>/testcall smc</code> (test SMC+NWE Tier 3).</i>`,
+          );
+        }
+
+        return ctx.replyWithHTML(
+          `⚠️ <b>Gửi lệnh gọi CallMeBot thất bại (0/${users.length}).</b>\n` +
+            `Vui lòng kiểm tra log terminal của server hoặc xác nhận lại quyền với <code>@CallMeBot_txtbot</code>.`,
+        );
+      } catch (err: any) {
+        return ctx.replyWithHTML(
+          `❌ <b>Lỗi khi gọi CallMeBot:</b> <code>${escapeHtml(err?.message || String(err))}</code>`,
+        );
+      }
     });
 
     // ==================== CÁC ACTIONS CHO BẢNG NWE DASHBOARD ====================

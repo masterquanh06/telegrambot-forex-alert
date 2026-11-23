@@ -197,4 +197,54 @@ test('TIER SSS (Siêu Hợp Lưu) — evaluateTierSss, Dedup & Coordinator', asy
     assert.equal(/<(?!\/?(b|i|code|u|s|pre|a)\b)/.test(html), false, 'Không được chứa ký tự < chưa escape');
     assert.equal(/&(?!amp;|lt;|gt;|quot;)/.test(html), false, 'Không được chứa ký tự & chưa escape');
   });
+
+  await t.test('7. CallMeBotService: buildSpokenMessage chuẩn <= 250 ký tự và SuperTierService kích hoạt gọi TIER_SSS', async () => {
+    const { CallMeBotService } = require('../dist/common/callmebot.service');
+    const callSvc = new CallMeBotService({
+      get: (k) => ({ CALLMEBOT_ENABLED: 'true', CALLMEBOT_USERS: '@trader_a, @trader_b' })[k],
+    });
+
+    assert.deepEqual(callSvc.getConfiguredUsers(), ['@trader_a', '@trader_b']);
+
+    const msgSss = callSvc.buildSpokenMessage({
+      reason: 'TIER_SSS',
+      direction: 'SELL',
+      price: 3623.9,
+      slPrice: 3636.4,
+    });
+    assert.ok(msgSss.length <= 250);
+    assert.ok(msgSss.includes('Tier S S S') && msgSss.includes('Bán'));
+
+    const msgSmc = callSvc.buildSpokenMessage({
+      reason: 'SMC_TIER_3',
+      direction: 'BUY',
+      price: 3541.5,
+      slPrice: 3528.4,
+      detailText: 'khung H4 M15',
+    });
+    assert.ok(msgSmc.length <= 250);
+    assert.ok(msgSmc.includes('Tier 3') && msgSmc.includes('Mua'));
+
+    // Kiểm tra SuperTierService tự động gọi callMeBotService khi nổ TIER SSS
+    const calledReasons = [];
+    const mockCallMeBot = {
+      triggerVoiceCall: async (p) => {
+        calledReasons.push(p);
+        return 1;
+      },
+    };
+    const mockPrisma = {
+      executeWithRetry: async (fn) => fn(),
+      telegramUser: { findMany: async () => [{ chatId: 'u_vip', tier2AlertEnabled: true }] },
+    };
+    const mockTelegram = { sendMessage: async () => {} };
+
+    const supSvc = new SuperTierService(mockPrisma, mockTelegram, mockCallMeBot);
+    await supSvc.reportTier3Event(makeBbEvent({ triggeredAtMs: Date.now() }));
+    await supSvc.reportTier3Event(makeSmcEvent({ triggeredAtMs: Date.now() + 1000 }));
+
+    assert.equal(calledReasons.length, 1);
+    assert.equal(calledReasons[0].reason, 'TIER_SSS');
+    assert.equal(calledReasons[0].direction, 'SELL');
+  });
 });

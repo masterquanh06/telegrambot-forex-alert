@@ -25,9 +25,10 @@ Hệ thống sở hữu **Pure Signal Engines** độc lập (dễ kiểm thử 
   * 🔥🔥 **Tier 2 (MTF Confluence):** Chạm biên **NWE H1** **ĐỒNG THỜI** giao cắt ≥ 1 khối **Order Block** từ các khung **`M15`, `M30`, `H1`, `H4`** (ưu tiên khối chính `H4 > H1 > M30 > M15`, tự động chống trùng với hợp lưu đơn khung H1).
   * 🔥🔥🔥 **Tier 3 (VIP):** Thỏa Tier 2 **+** xuất hiện **nến rút râu từ chối khung M15** (`detectZoneRejectionWick` lọc theo **`ATR(14)` M15** — hỗ trợ bắt râu ngay trong lòng OB rộng miễn không phá vỡ mép ngoài `ob.top`/`ob.bottom`, chống rút râu ảo ≥ phút thứ 12 của nến M15).
 
-### 2B. 👑💎🔥🔥🔥 TIER SSS — Siêu Hợp Lưu Tối Thượng
+### 2B. 👑💎🔥🔥🔥 TIER SSS — Siêu Hợp Lưu Tối Thượng & 📞 Gọi Điện Báo Thức (CallMeBot)
 * Tự động kích hoạt qua `SuperTierService` (`src/common/super-tier.service.ts` + pure engine `src/indicator/super-tier-classifier.ts`) khi **cả `BB+ATR M5 (Tier 3)` và `SMC+NWE M15 (Tier 3)` cùng xuất hiện 1 chiều trong cửa sổ 20 phút**.
 * Hợp nhất kế hoạch vào lệnh: **SL an toàn nhất** (`max` cho SELL / `min` cho BUY giữa 2 hệ thống), **TP1 (`BB Middle M5`)**, **TP2 (`NWE H1 Kernel`)**, kèm khóa chống trùng theo cặp nến và cooldown 15 phút cùng chiều.
+* **Gọi điện báo thức Telegram qua CallMeBot (`src/common/callmebot.service.ts`):** Tự động đổ chuông và đọc tiếng Việt trực tiếp trên Telegram **CHỈ cho 2 trường hợp VIP nhất: `TIER SSS` và `SMC+NWE Tier 3`** (tự chống gọi đúp khi SMC Tier 3 nâng cấp thành TIER SSS). Hỗ trợ test nhanh bất cứ lúc nào bằng lệnh `/testcall` — xem hướng dẫn cài đặt từng bước tại **[CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md)**.
 
 ### 3. 🔔 Cảnh báo Giá, 🟡 RSI Vàng Đa Khung & 📰 Kinh tế Vĩ mô
 * **Price Alert (`/alert`):** Cảnh báo chạm mốc giá mục tiêu tức thì cho Vàng và Crypto (Cron 12s).
@@ -57,6 +58,7 @@ Hệ thống sở hữu **Pure Signal Engines** độc lập (dễ kiểm thử 
 | **Order Blocks (SMC)** | `/ob` (hoặc `/smc`, `/orderblock`) | Mở Dashboard Supply/Demand OB (`M5–D1`), bật/tắt từng khung |
 | | `/ob m15`, `/ob on`, `/ob off` | Xem nhanh OB khung M15 hoặc bật/tắt cảnh báo OB |
 | **Tier 3 (VIP)** | `/tier3` (hoặc `/tier2`, `/sweep`) | Bật / Tắt riêng cảnh báo Tier 3 VIP (Rút râu M5 & M15) |
+| **Gọi báo thức** | `/testcall` (hoặc `/testcall smc`) | Test gọi điện báo thức Telegram qua CallMeBot |
 | **Cảnh báo Giá** | `/alert <mã> <giá>` / `/alerts` | Đặt & quản lý cảnh báo chạm giá (VD: `/alert xau 3650`) |
 | **RSI Vàng** | `/gold` / `/goldalert` | Xem bảng RSI 7 khung & cài đặt ngưỡng cảnh báo |
 | **Kinh tế Vĩ mô** | `/calendar` / `/settings` | Xem lịch ForexFactory hôm nay & chọn mức độ tin (Cao/TB/Thấp) |
@@ -110,5 +112,6 @@ npm run start:prod  # Production
 ---
 
 ## 📚 Tài liệu chi tiết
+* 📞 **Hướng dẫn cài đặt & xử lý lỗi gọi điện báo thức Telegram (CallMeBot):** 👉 **[CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md)**
 * 🔥 **Giải thích toàn bộ các Tier ở mọi chiến lược & công thức lọc râu:** 👉 **[TIER_SYSTEM.md](TIER_SYSTEM.md)**
 * 📖 **Danh sách đầy đủ câu lệnh, nút bấm & hướng dẫn sử dụng:** 👉 **[COMMANDS.md](COMMANDS.md)**
