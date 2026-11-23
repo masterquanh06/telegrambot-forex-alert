@@ -112,6 +112,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
   // Cache cấu hình người dùng phòng trường hợp DB chưa migrate cột mới
   private readonly userSettingFallback = new Map<string, boolean>();
+  private readonly userTier0Fallback = new Map<string, boolean>();
   private readonly userTier2Fallback = new Map<string, boolean>();
   private readonly userBiasFallback = new Map<string, BbAtrBias>();
   private readonly activeChatIds = new Set<string>(['5513976350']);
@@ -1074,20 +1075,92 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Lấy danh sách tất cả ChatId người dùng có bật nhận cảnh báo tự động kèm bộ lọc Bias
-   * TUYỆT ĐỐI KHÔNG GỬI NẾU NGƯỜI DÙNG ĐÃ TẮT CẢNH BÁO (bbAtrAlertEnabled = false)
+   * Lấy trạng thái Bật/Tắt riêng của Cảnh báo Tier 0 (Chạm dải BB thường)
    */
-  async getAllUsersForGlobalAlert(): Promise<Array<{ chatId: string; bias: BbAtrBias }>> {
+  async getUserTier0Enabled(chatId: string): Promise<boolean> {
+    if (this.userTier0Fallback.has(chatId)) {
+      return this.userTier0Fallback.get(chatId)!;
+    }
+
     try {
-      const allUsers = await this.prisma.executeWithRetry(() =>
-        this.prisma.telegramUser.findMany({
-          select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true },
+      const user = await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.findUnique({
+          where: { chatId },
+          select: { bbTier0AlertEnabled: true },
         }),
       );
+      if (user && typeof user.bbTier0AlertEnabled === 'boolean') {
+        this.userTier0Fallback.set(chatId, user.bbTier0AlertEnabled);
+        return user.bbTier0AlertEnabled;
+      }
+    } catch (e) {
+      // Bỏ qua lỗi DB schema nếu cột bbTier0AlertEnabled chưa push lên DB
+    }
+
+    return this.userTier0Fallback.get(chatId) ?? true;
+  }
+
+  /**
+   * Bật/Tắt riêng Cảnh báo Tier 0 (Chạm dải BB thường — giữ nguyên Tier 1, 2A, 2B, 3)
+   */
+  async toggleUserTier0Enabled(chatId: string): Promise<boolean> {
+    const current = await this.getUserTier0Enabled(chatId);
+    const next = !current;
+    return this.setUserTier0Enabled(chatId, next);
+  }
+
+  /**
+   * Đặt trực tiếp trạng thái Bật (true) hoặc Tắt (false) nhận cảnh báo Tier 0
+   */
+  async setUserTier0Enabled(chatId: string, enabled: boolean): Promise<boolean> {
+    this.userTier0Fallback.set(chatId, enabled);
+
+    try {
+      await this.prisma.executeWithRetry(() =>
+        this.prisma.telegramUser.upsert({
+          where: { chatId },
+          update: { bbTier0AlertEnabled: enabled },
+          create: { chatId, bbTier0AlertEnabled: enabled },
+        }),
+      );
+    } catch (e) {
+      // Fallback in-memory nếu cột chưa migrate
+    }
+
+    return enabled;
+  }
+
+  /**
+   * Lấy danh sách tất cả ChatId người dùng có bật nhận cảnh báo tự động kèm bộ lọc Bias & Tier 0
+   * TUYỆT ĐỐI KHÔNG GỬI NẾU NGƯỜI DÙNG ĐÃ TẮT CẢNH BÁO (bbAtrAlertEnabled = false)
+   */
+  async getAllUsersForGlobalAlert(): Promise<Array<{ chatId: string; bias: BbAtrBias; tier0Enabled: boolean }>> {
+    try {
+      let allUsers: Array<{
+        chatId: string;
+        bbAtrAlertEnabled: boolean;
+        bbAtrBias: string;
+        bbTier0AlertEnabled?: boolean;
+      }> = [];
+
+      try {
+        allUsers = await this.prisma.executeWithRetry(() =>
+          this.prisma.telegramUser.findMany({
+            select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true, bbTier0AlertEnabled: true },
+          }),
+        );
+      } catch (colErr) {
+        // Fallback an toàn nếu cột bbTier0AlertEnabled chưa được push lên DB production
+        allUsers = await this.prisma.executeWithRetry(() =>
+          this.prisma.telegramUser.findMany({
+            select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true },
+          }),
+        );
+      }
 
       if (allUsers && allUsers.length > 0) {
         const knownDbChatIds = new Set(allUsers.map((u) => u.chatId));
-        const result: Array<{ chatId: string; bias: BbAtrBias }> = [];
+        const result: Array<{ chatId: string; bias: BbAtrBias; tier0Enabled: boolean }> = [];
 
         for (const u of allUsers) {
           // Trạng thái BẬT/TẮT: Kiểm tra cả Database và Fallback bộ nhớ
@@ -1096,11 +1169,14 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
           const isDbOff = u.bbAtrAlertEnabled === false;
 
           if (!isDbOff && !isFallbackOff) {
+            const fbTier0 = this.userTier0Fallback.get(u.chatId);
+            const tier0Enabled = fbTier0 !== undefined ? fbTier0 : u.bbTier0AlertEnabled !== false;
             result.push({
               chatId: u.chatId,
               bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
                 ? (u.bbAtrBias as BbAtrBias)
                 : this.userBiasFallback.get(u.chatId) || 'BOTH'),
+              tier0Enabled,
             });
           }
         }
@@ -1112,6 +1188,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
               result.push({
                 chatId,
                 bias: this.userBiasFallback.get(chatId) || 'BOTH',
+                tier0Enabled: this.userTier0Fallback.get(chatId) ?? true,
               });
             }
           }
@@ -1124,12 +1201,13 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Fallback khi DB lỗi
-    const fallbackList: Array<{ chatId: string; bias: BbAtrBias }> = [];
+    const fallbackList: Array<{ chatId: string; bias: BbAtrBias; tier0Enabled: boolean }> = [];
     for (const chatId of this.activeChatIds) {
       if (this.userSettingFallback.get(chatId) === true) {
         fallbackList.push({
           chatId,
           bias: this.userBiasFallback.get(chatId) || 'BOTH',
+          tier0Enabled: this.userTier0Fallback.get(chatId) ?? true,
         });
       }
     }
@@ -1355,15 +1433,22 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
         const alertMessage = this.renderAlertMessage(state, state.signal);
 
+        // Với Tier 0: bỏ qua user đã tắt riêng Tier 0 (nhưng vẫn giữ lại cho Tier 1, 2A, 2B, 3)
         // Với Tier 0, 1, 2 (bao gồm Tier 2A & 2B): lọc theo Daily Trend Bias
+        const isTier0 = (state.alertTier || 0) === 0;
         const eligibleChatIds = subscribers
           .filter((sub) => {
             if (state.alertTier === 3) return true;
+            if (isTier0 && (sub as any).tier0Enabled === false) return false;
             if (isSellSide && sub.bias === 'BUY_ONLY') return false;
             if (isBuySide && sub.bias === 'SELL_ONLY') return false;
             return true;
           })
           .map((sub) => sub.chatId);
+
+        if (eligibleChatIds.length === 0) {
+          return false;
+        }
 
         const sentCount = await this.broadcastTelegramInBatches(
           eligibleChatIds,
@@ -1899,6 +1984,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     isAlertEnabled: boolean,
     bias: BbAtrBias = 'BOTH',
     isTier2Enabled = true,
+    isTier0Enabled = true,
   ): string {
     const isGold = state.assetType === 'GOLD';
     const alertStatusText = isAlertEnabled ? '🟢 ĐANG BẬT (Tự động nhận tin)' : '⚪ ĐÃ TẮT';
@@ -1988,6 +2074,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     msg += `🧭 <b>Lọc xu hướng ngày (Bias):</b> <b>${biasText}</b>\n`;
     if (isGold) {
       msg += `🔔 <b>Cảnh báo tự động XAU M5:</b> <b>${alertStatusText}</b>\n`;
+      msg += `🔕 <b>Cảnh báo Tier 0 (Chạm BB thường):</b> <b>${isTier0Enabled ? '🟢 ĐANG BẬT' : '⚪ ĐÃ TẮT (Chỉ nhận Tier 1, 2, 3)'}</b>\n`;
       msg += `🔥 <b>Cảnh báo Tier 3 (BB ± ATR + Rút râu M5):</b> <b>${isTier2Enabled ? '🟢 ĐANG BẬT (Ưu tiên cao nhất)' : '⚪ ĐÃ TẮT'}</b>\n`;
     }
 

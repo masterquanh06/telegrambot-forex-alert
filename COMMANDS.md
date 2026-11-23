@@ -25,6 +25,7 @@
 | **Hệ thống** | `/start` | `/help` | Hiển thị bảng chào mừng và danh sách tính năng tổng quan. |
 | **BB + ATR (M5)** | `/bbatr` | `/bb`, `/bb_atr`, `/bba`, `/bollinger`, `/strat` | Mở Dashboard BB(20) + ATR(14) + RSI(14) M5, vùng Entry, SL, TP, Bias ngày. |
 | | `/bbatr on` / `/bbatr off` | `/bb on`, `/bb off` | Bật hoặc tắt cảnh báo tự động XAU/USD M5 (Tier 0, 1, 2A, 2B). |
+| | `/bbatr tier0 [on\|off]` | `/bb t0`, `/bb tier0 off` | Bật hoặc tắt **riêng Tier 0 (Chạm BB thường)** — vẫn nhận đầy đủ Tier 1, 2A/2B và Tier 3. |
 | | `/bbatr bias buy` | `/bbatr buy`, `/bb buy`, `/bb long`, `/bb mua` | Lọc Daily Bias: chỉ nhận chiều **BUY** (bỏ qua SELL). |
 | | `/bbatr bias sell` | `/bbatr sell`, `/bb sell`, `/bb short`, `/bb ban` | Lọc Daily Bias: chỉ nhận chiều **SELL** (bỏ qua BUY). |
 | | `/bbatr bias both` | `/bbatr both`, `/bb both`, `/bb all` | Nhận cả 2 chiều **BUY & SELL**. |
@@ -76,7 +77,8 @@ Chiến lược đo lực kiệt sức (Exhaustion) trên khung **M5** sử dụ
 * `🔄 Làm Mới Dữ Liệu` | `🔔 Bật / 🔕 Tắt Cảnh Báo XAU M5`
 * Bộ lọc Daily Bias: `🟢 Chỉ Buy` | `🔴 Chỉ Sell` | `⚖️ Cả 2 chiều`
 * Đổi khung xem nhanh: `M5` | `M15` | `H1` | `H4`
-* `🔥 Tier 3 (Rút Râu M5): ✅ BẬT / ❌ TẮT` | `ℹ️ Hướng Dẫn`
+* `🔔 Tier 0 (Chạm BB): ✅ BẬT / ❌ TẮT` | `🔥 Tier 3 (Rút Râu M5): ✅ BẬT / ❌ TẮT`
+* `ℹ️ Hướng Dẫn & Tier System`
 
 ---
 

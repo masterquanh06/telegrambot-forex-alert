@@ -143,7 +143,8 @@ Hệ thống SMC + NWE được thiết kế đồng bộ **3 tầng rõ ràng (
 
 | Công tắc / Lệnh | Tác dụng thực tế lên từng Tier |
 | :--- | :--- |
-| **BB+ATR:** `/bbatr on` / `/bbatr off` *(Cảnh báo tự động XAU M5)* | Bật/Tắt **cả cụm Tier 0 + Tier 1 + Tier 2A + Tier 2B** của BB+ATR. *(Lưu ý: Tắt công tắc này sẽ tắt luôn Tier 1 và Tier 2, chỉ còn nhận Tier 3 VIP nếu nút Tier 3 đang BẬT)*. |
+| **BB+ATR Master:** `/bbatr on` / `/bbatr off` *(Cảnh báo tự động XAU M5)* | Bật/Tắt **cả cụm Tier 0 + Tier 1 + Tier 2A + Tier 2B** của BB+ATR (chỉ chừa Tier 3 VIP nếu nút Tier 3 đang BẬT). |
+| **BB+ATR Tier 0:** `/bbatr tier0` *(hoặc nút `🔔 Tier 0 (Chạm BB)` trên Dashboard `/bbatr`)* | Bật/Tắt **riêng Tier 0 (chạm dải BB thường)**. Khi TẮT (và vẫn bật `/bbatr on`), bot im lặng với Tier 0 nhưng **vẫn bắn đầy đủ Tier 1, Tier 2A, Tier 2B và Tier 3**. |
 | **BB+ATR Bias:** `/bbatr buy` / `sell` / `both` | Áp dụng lọc hướng cho **Tier 0, Tier 1, Tier 2A, Tier 2B**. **Không chặn Tier 3 VIP** (luôn báo 2 chiều khi có tín hiệu VIP). |
 | **NWE:** `/nwe on` / `/nwe off` & chọn khung | Bật/Tắt cảnh báo **Tier 1 NWE** theo từng khung. Nếu bật `NWE H1`, tự động nhận cả **SMC+NWE Tier 2 (MTF)**. |
 | **Order Block:** `/ob on` / `/ob off` & chọn khung | Bật/Tắt cảnh báo **Tier 1 OB** theo từng khung. Nếu bật khung thuộc `M15/M30/H1/H4`, tự động nhận **SMC+NWE Tier 2 (MTF)** khi khối khung đó khớp với NWE H1. |

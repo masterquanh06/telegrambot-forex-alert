@@ -619,6 +619,26 @@ Gõ lệnh theo cú pháp:
         return ctx.replyWithHTML(`🔕 <b>ĐÃ TẮT</b> nhận cảnh báo tự động Chiến lược BB+ATR XAU/USD M5.\n\n${msgText}`, keyboard);
       }
 
+      // Trường hợp 3B: Bật / Tắt riêng Tier 0 (Chạm dải BB thường, vẫn nhận Tier 1, 2A, 2B, 3)
+      if (['tier0', 't0'].includes(firstArg)) {
+        const subArg = (parts[1] || '').toLowerCase();
+        let isNowOn: boolean;
+        if (['on', 'bat', 'enable'].includes(subArg)) {
+          isNowOn = await this.bbAtrService.setUserTier0Enabled(chatId, true);
+        } else if (['off', 'tat', 'disable'].includes(subArg)) {
+          isNowOn = await this.bbAtrService.setUserTier0Enabled(chatId, false);
+        } else {
+          isNowOn = await this.bbAtrService.toggleUserTier0Enabled(chatId);
+        }
+        const { text: msgText, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
+        return ctx.replyWithHTML(
+          isNowOn
+            ? `🔔 <b>ĐÃ BẬT</b> cảnh báo <b>Tier 0 (Chạm dải BB thường)</b>.\n\n${msgText}`
+            : `🔕 <b>ĐÃ TẮT</b> cảnh báo <b>Tier 0 (Chạm dải BB thường)</b>! Bạn vẫn nhận đầy đủ <b>Tier 1, Tier 2A, Tier 2B và Tier 3</b>.\n\n${msgText}`,
+          keyboard,
+        );
+      }
+
       // Trường hợp 3: Danh sách cảnh báo cá nhân
       if (['list', 'ds', 'danhsach'].includes(firstArg)) {
         const { text: msgText, keyboard } = await this.renderBbAtrAlertsView(chatId);
@@ -720,6 +740,24 @@ Gõ lệnh theo cú pháp:
       if (!chatId) return;
       const next = await this.bbAtrService.toggleUserBbAtrEnabled(chatId);
       await ctx.answerCbQuery(next ? '🔔 Đã BẬT cảnh báo tự động XAU M5!' : '🔕 Đã TẮT cảnh báo tự động XAU M5!');
+      const { text, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(text, keyboard);
+      }
+    });
+
+    // Action: Bật/Tắt riêng Cảnh báo Tier 0 (Chạm dải BB thường) từ BB Dashboard
+    this.bot.action('bbatr_toggle_tier0', async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const isNowOn = await this.bbAtrService.toggleUserTier0Enabled(chatId);
+      await ctx.answerCbQuery(
+        isNowOn
+          ? '🔔 Đã BẬT cảnh báo Tier 0 (Chạm dải BB)!'
+          : '🔕 Đã TẮT Tier 0! Vẫn nhận đủ Tier 1, 2A/2B và Tier 3.',
+      );
       const { text, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
       try {
         await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
@@ -1838,8 +1876,15 @@ ${summaryTag}
     const isAlertEnabled = await this.bbAtrService.getUserBbAtrEnabled(chatId);
     const bias = await this.bbAtrService.getUserBias(chatId);
     const isTier2Enabled = await this.bbAtrService.getUserTier2Enabled(chatId);
+    const isTier0Enabled = await this.bbAtrService.getUserTier0Enabled(chatId);
 
-    const text = this.bbAtrService.renderDashboardMessage(state, isAlertEnabled, bias, isTier2Enabled);
+    const text = this.bbAtrService.renderDashboardMessage(
+      state,
+      isAlertEnabled,
+      bias,
+      isTier2Enabled,
+      isTier0Enabled,
+    );
 
     const isGold = state.assetType === 'GOLD';
     const alertToggleBtnText = isAlertEnabled
@@ -1874,10 +1919,16 @@ ${summaryTag}
       ],
       [
         Markup.button.callback(
+          isTier0Enabled ? '🔔 Tier 0 (Chạm BB): ✅ BẬT' : '🔕 Tier 0 (Chạm BB): ❌ TẮT',
+          'bbatr_toggle_tier0',
+        ),
+        Markup.button.callback(
           isTier2Enabled ? '🔥 Tier 3 (Rút Râu M5): ✅ BẬT' : '🔥 Tier 3 (Rút Râu M5): ❌ TẮT',
           'bbatr_toggle_tier2',
         ),
-        Markup.button.callback('ℹ️ Hướng Dẫn', 'bbatr_help'),
+      ],
+      [
+        Markup.button.callback('ℹ️ Hướng Dẫn & Tier System', 'bbatr_help'),
       ],
     ]);
 
