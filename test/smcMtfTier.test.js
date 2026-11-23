@@ -289,4 +289,25 @@ test('SMC + NWE Cross-Timeframe Engine (NWE H1 + OB M15/M30/H1/H4 + Rút râu M1
     }
     assert.equal(calculateWilderAtr(m15Candles, 14), 12);
   });
+
+  await t.test('10. SmcService.calculateNwe khớp chuẩn Pine Script (tính y2[i] riêng từng nến trên 500 nến, không phình MAE khi trend mạnh)', () => {
+    const { SmcService } = require('../dist/smc/smc.service');
+    const svc = Object.create(SmcService.prototype);
+
+    // Tạo chuỗi 500 nến giảm dốc tuyến tính từ 3900 xuống 3401 (-1$/nến)
+    // Với Pine Script chuẩn: y2[i] bám sát đường thẳng nên MAE gần bằng ~0 (chỉ lệch nhẹ ở 2 đầu mút)
+    // Code cũ so mọi nến với kernelValue cuối sẽ ra MAE khổng lồ (~25$ -> band ~75$!)
+    const trendCandles = [];
+    for (let i = 0; i < 500; i++) {
+      const p = 3900 - i;
+      trendCandles.push(makeCandle(BASE_M15_MS + i * 3600000, p + 0.5, p + 1, p - 1, p));
+    }
+
+    const nwe = svc.calculateNwe(trendCandles, 8, 3.0);
+    assert.ok(nwe.mae < 1.0, `MAE trên chuỗi tuyến tính phải rất nhỏ (< 1.0), thực tế: ${nwe.mae}`);
+    assert.ok(
+      nwe.upperBand - nwe.kernel < 3.0,
+      `Biên trên phải bám sát đường cong (< 3.0), thực tế: ${nwe.upperBand - nwe.kernel}`,
+    );
+  });
 });

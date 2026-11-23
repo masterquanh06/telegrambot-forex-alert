@@ -11,6 +11,7 @@ import { AlertModule } from './alert/alert.module';
 import { IndicatorModule } from './indicator/indicator.module';
 import { SmcModule } from './smc/smc.module';
 import { LiquiditySweepModule } from './services/liquiditySweep.module';
+import { SuperTierModule } from './common/super-tier.module';
 
 @Controller()
 class HelloController {
@@ -36,6 +37,7 @@ class HelloController {
     IndicatorModule,
     SmcModule,
     LiquiditySweepModule,
+    SuperTierModule,
   ],
   controllers: [HelloController],
 })

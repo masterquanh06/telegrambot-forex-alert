@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject, forwardRef, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional, forwardRef, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import axios from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramService } from '../telegram/telegram.service';
@@ -19,6 +19,7 @@ import {
   normalizeCandleTimeMs,
   M5_DURATION_MS,
 } from './signal-classifier';
+import { SuperTierService } from '../common/super-tier.service';
 
 @Injectable()
 export class BbAtrService implements OnModuleInit, OnModuleDestroy {
@@ -130,6 +131,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
+    @Optional()
+    private readonly superTierService?: SuperTierService,
   ) {}
 
   onModuleInit() {
@@ -1518,6 +1521,34 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         this.logger.log(
           `🔔 [BB+ATR M5 ALERT: ${tierName}] ${state.signal} XAU/USD tại giá $${state.currentPrice} -> Đã gửi thành công tới ${sentCount} người dùng.`,
         );
+
+        // Báo cáo sự kiện Tier 3 sang SuperTierService để đánh giá Siêu Hợp Lưu TIER SSS
+        if (state.alertTier === 3 && this.superTierService) {
+          this.superTierService
+            .reportTier3Event({
+              source: 'BB_ATR',
+              direction: isSellSide ? 'SELL' : 'BUY',
+              triggeredAtMs: now,
+              candleTimeMs: state.rejectionCandleTime ?? candleTime,
+              currentPrice: state.currentPrice,
+              slPrice: isSellSide ? state.sellSl : state.buySl,
+              tp1Price: state.bbMiddle,
+              summary: state.signalReason,
+              details: {
+                bbUpper: state.bbUpper,
+                bbMiddle: state.bbMiddle,
+                bbLower: state.bbLower,
+                upperEntry: state.upperEntry,
+                lowerEntry: state.lowerEntry,
+                atrM5: state.atrValue,
+                rsiValue: state.rsiValue,
+              },
+            })
+            .catch((err) => {
+              this.logger.warn(`Lỗi báo cáo BB Tier 3 sang SuperTierService: ${err.message}`);
+            });
+        }
+
         return true;
       }
 

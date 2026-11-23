@@ -1,4 +1,4 @@
-import { Injectable, Logger, Inject, forwardRef } from '@nestjs/common';
+import { Injectable, Logger, Inject, Optional, forwardRef, OnModuleInit, OnModuleDestroy } from '@nestjs/common';
 import axios from 'axios';
 import { PrismaService } from '../prisma/prisma.service';
 import { TelegramService } from '../telegram/telegram.service';
@@ -19,10 +19,22 @@ import {
   classifySmcMtfTier,
   SMC_MTF_OB_TIMEFRAMES,
 } from './smc-mtf-classifier';
+import { SuperTierService } from '../common/super-tier.service';
 
 @Injectable()
-export class SmcService {
+export class SmcService implements OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(SmcService.name);
+
+  // TradingView Live Multi-Timeframe WebSocket (TVC:GOLD — 500 nến mỗi khung, khớp chuẩn chart TradingView)
+  private tvWs: any = null;
+  private isTvWsConnected = false;
+  private isTvWsConnecting = false;
+  private isDestroyed = false;
+  private tvWsReconnectTimer: NodeJS.Timeout | null = null;
+  private readonly tvSessionToTf = new Map<string, SmcTimeframe>();
+  private readonly liveTvCandlesMap = new Map<SmcTimeframe, CandleData[]>();
+  private readonly inFlightTvFetch = new Map<string, Promise<CandleData[] | null>>();
+  private lastDataSource: 'TVC:GOLD' | 'BINANCE' = 'TVC:GOLD';
 
   // Cache nến klines theo khung thời gian (8 giây)
   private readonly klinesCache = new Map<string, { candles: CandleData[]; time: number }>();
@@ -78,11 +90,33 @@ export class SmcService {
     D1: '1d',
   };
 
+  readonly tradingViewIntervalMap: Record<SmcTimeframe, string> = {
+    M1: '1',
+    M5: '5',
+    M15: '15',
+    M30: '30',
+    H1: '60',
+    H4: '240',
+    D1: '1D',
+  };
+
   constructor(
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
+    @Optional()
+    private readonly superTierService?: SuperTierService,
   ) {}
+
+  onModuleInit() {
+    this.isDestroyed = false;
+    this.initTradingViewMultiTfStream();
+  }
+
+  onModuleDestroy() {
+    this.isDestroyed = true;
+    this.stopTradingViewMultiTfStream();
+  }
 
   registerActiveChat(chatId: string) {
     if (chatId) {
@@ -91,19 +125,292 @@ export class SmcService {
   }
 
   /**
-   * Tải dữ liệu nến cho Vàng (XAU/USD) theo khung thời gian
+   * Kết nối 1 luồng WebSocket duy nhất tới TradingView (TVC:GOLD) đăng ký đồng thời 6 khung
+   * (M5, M15, M30, H1, H4, D1 — mỗi khung 500 nến) để tính NWE & SMC OB chuẩn 100% chart TradingView (0ms latency).
    */
-  async fetchCandles(timeframe: SmcTimeframe = 'M15', limit = 100): Promise<CandleData[]> {
+  private initTradingViewMultiTfStream() {
+    if (this.isDestroyed || this.isTvWsConnecting || this.isTvWsConnected) return;
+    this.isTvWsConnecting = true;
+
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const WebSocket = require('ws');
+      this.tvWs = new WebSocket('wss://data.tradingview.com/socket.io/websocket', {
+        headers: {
+          Origin: 'https://www.tradingview.com',
+          'User-Agent':
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        },
+      });
+
+      const createMsg = (func: string, args: any[]) => {
+        const json = JSON.stringify({ m: func, p: args });
+        return '~m~' + json.length + '~m~' + json;
+      };
+
+      this.tvWs.on('open', () => {
+        this.isTvWsConnected = true;
+        this.isTvWsConnecting = false;
+        this.tvSessionToTf.clear();
+        this.liveTvCandlesMap.clear();
+        this.logger.log(
+          '🟢 [SMC/NWE Live WS] Đã kết nối TradingView TVC:GOLD đa khung (M5, M15, M30, H1, H4, D1 — 500 nến/khung)!',
+        );
+
+        this.tvWs.send(createMsg('set_auth_token', ['unauthorized_user_token']));
+        for (const tf of this.supportedTimeframes) {
+          const tvInterval = this.tradingViewIntervalMap[tf];
+          const cs = `cs_smc_${tf}_${Math.random().toString(36).substring(2, 8)}`;
+          this.tvSessionToTf.set(cs, tf);
+          this.tvWs.send(createMsg('chart_create_session', [cs, '']));
+          this.tvWs.send(
+            createMsg('resolve_symbol', [cs, 'sds_sym_1', '={"symbol":"TVC:GOLD","adjustment":"splits"}']),
+          );
+          this.tvWs.send(createMsg('create_series', [cs, 'sds_1', 's1', 'sds_sym_1', tvInterval, 500, '']));
+        }
+      });
+
+      this.tvWs.on('message', (data: any) => {
+        const raw = data.toString();
+        const packets = raw.split(/~m~\d+~m~/).filter(Boolean);
+        for (const packet of packets) {
+          if (packet.startsWith('~h~')) {
+            if (this.tvWs && this.tvWs.readyState === 1) {
+              this.tvWs.send('~m~' + packet.length + '~m~' + packet);
+            }
+            continue;
+          }
+          try {
+            const msg = JSON.parse(packet);
+            if (msg.m === 'timescale_update' || msg.m === 'du') {
+              const sessionId = msg.p?.[0];
+              const tf = this.tvSessionToTf.get(sessionId);
+              const sds = msg.p?.[1]?.sds_1;
+              if (tf && sds?.s && Array.isArray(sds.s)) {
+                this.handleTvCandlesUpdate(tf, sds.s);
+              }
+            }
+          } catch (e) {}
+        }
+      });
+
+      this.tvWs.on('close', () => {
+        this.isTvWsConnected = false;
+        this.isTvWsConnecting = false;
+        this.scheduleTvWsReconnect();
+      });
+
+      this.tvWs.on('error', (err: any) => {
+        this.logger.warn(`⚠️ [SMC/NWE Live WS] Mất kết nối TradingView: ${err.message}. Đang kết nối lại...`);
+        this.isTvWsConnected = false;
+        this.isTvWsConnecting = false;
+        this.scheduleTvWsReconnect();
+      });
+    } catch (err: any) {
+      this.logger.error(`Không thể khởi chạy SMC/NWE TradingView WS: ${err.message}`);
+      this.isTvWsConnecting = false;
+      this.scheduleTvWsReconnect();
+    }
+  }
+
+  private scheduleTvWsReconnect() {
+    if (this.isDestroyed || this.tvWsReconnectTimer) return;
+    this.tvWsReconnectTimer = setTimeout(() => {
+      this.tvWsReconnectTimer = null;
+      this.initTradingViewMultiTfStream();
+    }, 3000);
+  }
+
+  private stopTradingViewMultiTfStream() {
+    if (this.tvWsReconnectTimer) {
+      clearTimeout(this.tvWsReconnectTimer);
+      this.tvWsReconnectTimer = null;
+    }
+    if (this.tvWs) {
+      try {
+        this.tvWs.close();
+      } catch (e) {}
+      this.tvWs = null;
+    }
+    this.isTvWsConnected = false;
+  }
+
+  private handleTvCandlesUpdate(tf: SmcTimeframe, rows: any[]) {
+    let list = this.liveTvCandlesMap.get(tf);
+    if (!list) {
+      list = [];
+      this.liveTvCandlesMap.set(tf, list);
+    }
+
+    for (const row of rows) {
+      if (!row || !Array.isArray(row.v) || row.v.length < 5) continue;
+      const t = Number(row.v[0]) * 1000;
+      const candle: CandleData = {
+        time: t,
+        open: Number(row.v[1]),
+        high: Number(row.v[2]),
+        low: Number(row.v[3]),
+        close: Number(row.v[4]),
+        volume: Number(row.v[5] || 0),
+      };
+
+      const idx = list.findIndex((c) => c.time === t);
+      if (idx >= 0) {
+        list[idx].high = Math.max(list[idx].high, candle.high);
+        list[idx].low = Math.min(list[idx].low, candle.low);
+        list[idx].close = candle.close;
+        list[idx].volume = candle.volume;
+      } else {
+        list.push(candle);
+        // Giữ tối đa 550 nến để đảm bảo luôn đủ 500 nến cho công thức Pine Script NWE
+        if (list.length > 550) {
+          list.shift();
+        }
+      }
+    }
+
+    if (list.length > 1 && list[list.length - 1].time < list[list.length - 2].time) {
+      list.sort((a, b) => a.time - b.time);
+    }
+
+    if (list.length > 0) {
+      this.lastDataSource = 'TVC:GOLD';
+    }
+  }
+
+  /**
+   * Tải nhanh 1 lần từ TradingView WS (dùng khi live stream vừa khởi động chưa nạp xong hoặc trong script test)
+   */
+  private async fetchCandlesFromTradingViewOnce(
+    timeframe: SmcTimeframe,
+    limit = 500,
+    symbol = 'TVC:GOLD',
+  ): Promise<CandleData[] | null> {
+    const key = `${symbol}:${timeframe}:${limit}`;
+    if (this.inFlightTvFetch.has(key)) {
+      return this.inFlightTvFetch.get(key)!;
+    }
+
+    const promise = new Promise<CandleData[] | null>((resolve) => {
+      let ws: any = null;
+      let settled = false;
+      const finish = (val: CandleData[] | null) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (ws) {
+          try {
+            ws.close();
+          } catch (e) {}
+        }
+        this.inFlightTvFetch.delete(key);
+        resolve(val);
+      };
+
+      const timer = setTimeout(() => finish(null), 6000);
+
+      try {
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const WebSocket = require('ws');
+        ws = new WebSocket('wss://data.tradingview.com/socket.io/websocket', {
+          headers: {
+            Origin: 'https://www.tradingview.com',
+            'User-Agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+          },
+        });
+
+        const createMsg = (func: string, args: any[]) => {
+          const json = JSON.stringify({ m: func, p: args });
+          return '~m~' + json.length + '~m~' + json;
+        };
+
+        const cs = `cs_once_${timeframe}_${Math.random().toString(36).substring(2, 8)}`;
+        const tvInterval = this.tradingViewIntervalMap[timeframe] || '60';
+
+        ws.on('open', () => {
+          ws.send(createMsg('set_auth_token', ['unauthorized_user_token']));
+          ws.send(createMsg('chart_create_session', [cs, '']));
+          ws.send(
+            createMsg('resolve_symbol', [cs, 'sds_sym_1', `={"symbol":"${symbol}","adjustment":"splits"}`]),
+          );
+          ws.send(createMsg('create_series', [cs, 'sds_1', 's1', 'sds_sym_1', tvInterval, limit, '']));
+        });
+
+        ws.on('message', (data: any) => {
+          const packets = data.toString().split(/~m~\d+~m~/).filter(Boolean);
+          for (const packet of packets) {
+            if (packet.startsWith('~h~')) {
+              if (ws && ws.readyState === 1) {
+                ws.send('~m~' + packet.length + '~m~' + packet);
+              }
+              continue;
+            }
+            try {
+              const msg = JSON.parse(packet);
+              if (msg.m === 'timescale_update' && msg.p?.[1]?.sds_1?.s?.length) {
+                const candles: CandleData[] = msg.p[1].sds_1.s
+                  .filter((r: any) => r && Array.isArray(r.v) && r.v.length >= 5)
+                  .map((r: any) => ({
+                    time: Number(r.v[0]) * 1000,
+                    open: Number(r.v[1]),
+                    high: Number(r.v[2]),
+                    low: Number(r.v[3]),
+                    close: Number(r.v[4]),
+                    volume: Number(r.v[5] || 0),
+                  }))
+                  .sort((a: CandleData, b: CandleData) => a.time - b.time);
+
+                if (candles.length > 0) {
+                  finish(candles);
+                  return;
+                }
+              }
+            } catch (e) {}
+          }
+        });
+
+        ws.on('error', () => finish(null));
+      } catch (e) {
+        finish(null);
+      }
+    });
+
+    this.inFlightTvFetch.set(key, promise);
+    return promise;
+  }
+
+  /**
+   * Tải dữ liệu nến cho Vàng (XAU/USD) theo khung thời gian (mặc định 500 nến chuẩn Pine Script NWE)
+   * Ưu tiên: 1. TradingView Live WS (TVC:GOLD, 0ms) -> 2. TV One-Shot WS -> 3. Binance PAXGUSDT fallback
+   */
+  async fetchCandles(timeframe: SmcTimeframe = 'M15', limit = 500): Promise<CandleData[]> {
+    // 1. Nguồn ưu tiên số 1: Live WebSocket TradingView TVC:GOLD (0ms latency)
+    const liveCandles = this.liveTvCandlesMap.get(timeframe);
+    if (this.isTvWsConnected && liveCandles && liveCandles.length >= Math.min(limit, 50)) {
+      this.lastDataSource = 'TVC:GOLD';
+      return liveCandles.length > limit ? liveCandles.slice(-limit) : liveCandles;
+    }
+
     const cacheKey = `XAU:${timeframe}`;
     const now = Date.now();
 
     if (this.klinesCache.has(cacheKey)) {
       const cached = this.klinesCache.get(cacheKey)!;
-      if (now - cached.time < 8000) {
+      if (now - cached.time < 8000 && cached.candles.length >= Math.min(limit, 50)) {
         return cached.candles;
       }
     }
 
+    // 2. Nguồn ưu tiên số 2: TradingView One-Shot WS (TVC:GOLD)
+    const tvCandles = await this.fetchCandlesFromTradingViewOnce(timeframe, limit, 'TVC:GOLD');
+    if (tvCandles && tvCandles.length > 0) {
+      this.lastDataSource = 'TVC:GOLD';
+      this.klinesCache.set(cacheKey, { candles: tvCandles, time: now });
+      return tvCandles;
+    }
+
+    // 3. Nguồn dự phòng: Binance PAXGUSDT
     const interval = this.binanceIntervalMap[timeframe] || '15m';
 
     try {
@@ -122,6 +429,7 @@ export class SmcService {
           volume: parseFloat(k[5]),
         }));
 
+        this.lastDataSource = 'BINANCE';
         this.klinesCache.set(cacheKey, { candles, time: now });
         return candles;
       }
@@ -138,8 +446,11 @@ export class SmcService {
 
   /**
    * 1. TÍNH TOÁN DẢI NADARAYA-WATSON ENVELOPE + DYNAMIC S/R (NWE)
-   * Theo đúng công thức Gaussian Kernel Regression & LuxAlgo NWE
-   * Tham số: Bandwidth (h = 8), Multiplier (mult = 3.0)
+   * Khớp chính xác 100% Pine Script v5 "Nadaraya-Watson Envelope + Dynamic S/R" (repaint = true):
+   * - Lấy tối đa 500 nến gần nhất (i = 0 .. math.min(499, n - 1))
+   * - Tính đường cong mượt y2[i] riêng cho TỪNG nến i bằng trọng số đối xứng gauss(i - j, h)
+   * - sae = sum(|src[i] - y2[i]|) / math.min(499, n - 1) * mult
+   * - Upper Band = y2[0] + sae, Lower Band = y2[0] - sae
    */
   calculateNwe(candles: CandleData[], h = 8, mult = 3.0): NweEnvelope {
     const n = candles.length;
@@ -157,32 +468,45 @@ export class SmcService {
       };
     }
 
-    const windowSize = Math.min(n, 50);
-    const weights: number[] = [];
-    let sumWeights = 0;
+    const maxIdx = Math.min(499, n - 1);
+    const count = maxIdx + 1;
 
-    for (let i = 0; i < windowSize; i++) {
-      const w = Math.exp(-(i * i) / (2 * h * h));
-      weights.push(w);
-      sumWeights += w;
+    // src[i] = candles[n - 1 - i].close (i = 0 là nến hiện tại, giống Pine Script src[i])
+    const src = new Float64Array(count);
+    for (let i = 0; i < count; i++) {
+      src[i] = candles[n - 1 - i].close;
     }
 
-    let sumY = 0;
-    for (let i = 0; i < windowSize; i++) {
-      const c = candles[n - 1 - i];
-      sumY += c.close * weights[i];
+    // Precompute bảng Gaussian gauss(|i - j|, h) để chạy 500x500 cực nhanh (~1-2ms)
+    const gaussTable = new Float64Array(count);
+    const denom = 2 * h * h;
+    for (let d = 0; d < count; d++) {
+      gaussTable[d] = Math.exp(-(d * d) / denom);
     }
-    const kernelValue = sumY / sumWeights;
 
-    let sumDiff = 0;
-    for (let i = 0; i < windowSize; i++) {
-      const c = candles[n - 1 - i];
-      sumDiff += Math.abs(c.close - kernelValue);
+    let saeSum = 0;
+    let kernelValue = src[0];
+
+    for (let i = 0; i < count; i++) {
+      let sum = 0;
+      let sumw = 0;
+      for (let j = 0; j < count; j++) {
+        const w = gaussTable[i >= j ? i - j : j - i];
+        sum += src[j] * w;
+        sumw += w;
+      }
+      const y2 = sum / sumw;
+      if (i === 0) {
+        kernelValue = y2;
+      }
+      saeSum += Math.abs(src[i] - y2);
     }
-    const mae = sumDiff / windowSize;
 
-    const upperBand = kernelValue + mult * mae;
-    const lowerBand = kernelValue - mult * mae;
+    const mae = maxIdx > 0 ? saeSum / maxIdx : 0;
+    const bandWidth = mae * mult;
+
+    const upperBand = kernelValue + bandWidth;
+    const lowerBand = kernelValue - bandWidth;
 
     // Dynamic S/R: Tìm các đỉnh và đáy cục bộ trong 20 nến gần nhất
     let highestHigh = -Infinity;
@@ -372,7 +696,7 @@ export class SmcService {
       }
     }
 
-    const candles = await this.fetchCandles(timeframe, 100);
+    const candles = await this.fetchCandles(timeframe, 500);
     const currentCandle = candles[candles.length - 1];
     const currentPrice = currentCandle.close;
 
@@ -410,7 +734,10 @@ export class SmcService {
 
     const result: SmcAnalysisResult = {
       symbol: 'XAU',
-      displaySymbol: 'XAU/USD (Vàng Forex)',
+      displaySymbol:
+        this.lastDataSource === 'TVC:GOLD'
+          ? 'XAU/USD (Vàng Forex - TVC:GOLD)'
+          : 'XAU/USD (Vàng Forex - Binance)',
       currentPrice: Number(currentPrice.toFixed(2)),
       timeframe,
       nwe,
@@ -815,10 +1142,10 @@ export class SmcService {
     try {
       const now = Date.now();
       const [m15Candles, m30Candles, h1Candles, h4Candles] = await Promise.all([
-        this.fetchCandles('M15', 100),
-        this.fetchCandles('M30', 100),
-        this.fetchCandles('H1', 100),
-        this.fetchCandles('H4', 100),
+        this.fetchCandles('M15', 500),
+        this.fetchCandles('M30', 500),
+        this.fetchCandles('H1', 500),
+        this.fetchCandles('H4', 500),
       ]);
 
       if (!m15Candles.length || !h1Candles.length) {
@@ -915,7 +1242,10 @@ export class SmcService {
 
         const payload: SmcMtfAlertPayload = {
           symbol: 'XAU',
-          displaySymbol: 'XAU/USD (Vàng Forex)',
+          displaySymbol:
+            this.lastDataSource === 'TVC:GOLD'
+              ? 'XAU/USD (Vàng Forex - TVC:GOLD)'
+              : 'XAU/USD (Vàng Forex - Binance)',
           currentPrice: Number(m15Candle.close.toFixed(2)),
           nweH1,
           matchedOrderBlocks: result.matchedOrderBlocks,
@@ -979,23 +1309,55 @@ export class SmcService {
             `🔔 [SMC/NWE ${tierLabel}] ${payload.signal} tại $${payload.currentPrice} (OB: ${Array.from(matchedObTfs).join('+')}) -> Đã gửi ${sentCount} user.`,
           );
 
-          try {
-            await this.prisma.executeWithRetry(() =>
-              this.prisma.smcAlertLog.create({
-                data: {
-                  symbol: 'XAU',
-                  timeframe: 'MTF_H1',
-                  alertType: payload.signal,
-                  price: payload.currentPrice,
-                  zoneTop: payload.primaryOb.top,
-                  zoneBottom: payload.primaryOb.bottom,
-                  message: payload.signalReason,
-                },
-              }),
-            );
-          } catch (e) {}
+            try {
+              await this.prisma.executeWithRetry(() =>
+                this.prisma.smcAlertLog.create({
+                  data: {
+                    symbol: 'XAU',
+                    timeframe: 'MTF_H1',
+                    alertType: payload.signal,
+                    price: payload.currentPrice,
+                    zoneTop: payload.primaryOb.top,
+                    zoneBottom: payload.primaryOb.bottom,
+                    message: payload.signalReason,
+                  },
+                }),
+              );
+            } catch (e) {}
 
-          return { mtfActive: true, triggered: true };
+            // Báo cáo sự kiện Tier 3 sang SuperTierService để đánh giá Siêu Hợp Lưu TIER SSS
+            if (isTier3 && this.superTierService) {
+              const smcSlBuffer = Number((0.5 * payload.atrM15).toFixed(2));
+              const smcSl =
+                payload.direction === 'SELL'
+                  ? Number((payload.primaryOb.top + smcSlBuffer).toFixed(2))
+                  : Number((payload.primaryOb.bottom - smcSlBuffer).toFixed(2));
+
+              this.superTierService
+                .reportTier3Event({
+                  source: 'SMC_NWE',
+                  direction: payload.direction,
+                  triggeredAtMs: now,
+                  candleTimeMs: payload.rejectionCandleTime ?? candleTime,
+                  currentPrice: payload.currentPrice,
+                  slPrice: smcSl,
+                  tp1Price: payload.nweH1.kernel,
+                  tp2Price: payload.nweH1.kernel,
+                  summary: payload.signalReason,
+                  details: {
+                    nweH1: payload.nweH1,
+                    primaryOb: payload.primaryOb,
+                    matchedOrderBlocks: payload.matchedOrderBlocks,
+                    confluenceLevel: payload.confluenceLevel,
+                    atrM15: payload.atrM15,
+                  },
+                })
+                .catch((err) => {
+                  this.logger.warn(`Lỗi báo cáo SMC Tier 3 sang SuperTierService: ${err.message}`);
+                });
+            }
+
+            return { mtfActive: true, triggered: true };
         }
       }
 

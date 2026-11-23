@@ -106,7 +106,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
   <i>👉 Bot tự động phát hiện số liệu công bố Actual + Forecast + Previous và báo NGAY LẬP TỨC qua Telegram!</i>
 
 📋 <b>DANH SÁCH CÁC LỆNH TÍNH NĂNG:</b>
-🔥 <code>/tier3</code> (hoặc <code>/tier2</code>, <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản VIP (High Probability)
+👑 <b>TIER SSS (Siêu Hợp Lưu):</b> Tự động kích hoạt khi <b>BB+ATR M5 (Tier 3)</b> và <b>SMC/NWE M15 (Tier 3)</b> cùng chiều trong cửa sổ 20 phút!
+🔥 <code>/tier3</code> (hoặc <code>/tier2</code>, <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo VIP Tier 3 &amp; Tier SSS
 🌊 <code>/nwe</code> (hoặc <code>/envelope</code>) - Bảng Dashboard Nadaraya-Watson Envelope (NWE + Cản động)
 🧱 <code>/ob</code> (hoặc <code>/smc</code>, <code>/orderblock</code>) - Bảng Dashboard SMC Order Blocks (Vùng Cung/Cầu)
 🎯 <code>/bbatr</code> (hoặc <code>/bb</code>) - Chiến lược Bollinger Bands(20) + ATR(14) khung M5
@@ -1111,7 +1112,8 @@ Dải Nadaraya-Watson Envelope sử dụng thuật toán hồi quy hạt nhân p
 • 🔔 <b>TIER 1:</b> Chạm NWE đơn lẻ hoặc Order Block đơn lẻ trên từng khung thời gian.
 • 🔥🔥 <b>TIER 2 (MTF Confluence):</b> Chạm biên <b>NWE H1</b> ĐỒNG THỜI giao cắt ít nhất 1 khối <b>Order Block (M15, M30, H1, H4)</b>.
 • 🔥🔥🔥 <b>TIER 3 (VIP):</b> Thỏa Tier 2 CỘNG VỚI xuất hiện <b>nến rút râu từ chối khung M15</b> trong vùng hợp lưu (lọc chuẩn theo ATR M15).
-• Khung thời gian tối ưu cho XAU/USD: <b>M15 & H1</b>.
+• 👑💎🔥🔥🔥 <b>TIER SSS (Siêu Hợp Lưu):</b> Tự động kích hoạt khi cả <b>SMC/NWE M15 (Tier 3)</b> và <b>BB+ATR M5 (Tier 3)</b> cùng chiều trong vòng 20 phút!
+• Khung thời gian tối ưu cho XAU/USD: <b>M15 &amp; H1</b>.
       `.trim();
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('📊 Quay lại Bảng NWE M15', 'nwe_view:M15')],
@@ -1219,6 +1221,7 @@ Order Block (OB) là các vùng tích lũy lệnh lớn của tổ chức tài c
 • 🔔 <b>TIER 1:</b> Chạm Order Block hoặc biên NWE đơn lẻ từng khung.
 • 🔥🔥 <b>TIER 2 (MTF Confluence):</b> Chạm biên <b>NWE H1</b> ĐỒNG THỜI giao cắt ít nhất 1 khối <b>OB thuộc M15, M30, H1 hoặc H4</b>.
 • 🔥🔥🔥 <b>TIER 3 (VIP):</b> Thỏa Tier 2 CỘNG VỚI xuất hiện <b>nến rút râu từ chối khung M15</b> bên trong vùng hợp lưu OB (không phá vỡ mép ngoài OB, lọc chuẩn theo ATR M15)!
+• 👑💎🔥🔥🔥 <b>TIER SSS (Siêu Hợp Lưu):</b> Tự động kích hoạt khi cả <b>SMC/NWE M15 (Tier 3)</b> và <b>BB+ATR M5 (Tier 3)</b> cùng chiều trong vòng 20 phút!
       `.trim();
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('📊 Quay lại Bảng Order Block M15', 'ob_view:M15')],
@@ -2006,6 +2009,7 @@ ${summaryTag}
    - <b>Tier 2A (BB ± ATR + RSI cực trị):</b> <code>BB Upper + ATR</code> + <code>RSI(14) ≥ 70</code> (SELL) hoặc <code>BB Lower - ATR</code> + <code>RSI(14) ≤ 30</code> (BUY).
    - <b>Tier 2B (Nến rút râu từ chối tại dải BB):</b> Nến M5 đâm xuyên <code>BB Upper</code> / <code>BB Lower</code> và đóng thụt vào trong với râu từ chối mạnh (Pinbar hoặc nến đảo chiều thuận màu), không bắt buộc phải chạm <code>BB ± ATR</code>.
 • 🔥🔥🔥 <b>TIER 3 (3 Đốm Lửa - VIP):</b> Khớp vùng <code>BB ± ATR</code> CỘNG VỚI <b>Nến rút râu từ chối M5</b> ngay tại mốc <code>BB Upper + ATR</code> (SELL) hoặc <code>BB Lower - ATR</code> (BUY)!
+• 👑💎🔥🔥🔥 <b>TIER SSS (Siêu Hợp Lưu Tối Thượng):</b> Tự động kích hoạt khi <b>BB+ATR M5 (Tier 3)</b> và <b>SMC/NWE M15 (Tier 3)</b> cùng xuất hiện 1 chiều trong cửa sổ 20 phút — hợp nhất SL an toàn nhất + TP1 (BB Middle M5) + TP2 (NWE H1 Kernel)!
 
 <b>4. BỘ LỌC XU HƯỚNG CHÍNH TRONG NGÀY (DAILY TREND BIAS):</b>
 • 🟢 <b>BUY ONLY:</b> Khi xu hướng ngày là Tăng mạnh, chỉ nhận cảnh báo khi giá chạm Lower Entry để BUY (bỏ qua Upper Entry).

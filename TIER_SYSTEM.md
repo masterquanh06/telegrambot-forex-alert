@@ -9,7 +9,8 @@ Tài liệu này giải thích chi tiết **từng cấp độ Tier**, điều k
 | Phương pháp | Khung chính | Nguồn dữ liệu | Cấp độ cảnh báo (Tiers) | Tần suất quét |
 | :--- | :--- | :--- | :--- | :--- |
 | **1. BB(20) + ATR(14) + RSI(14)** | `M5` | TradingView WS `OANDA:XAUUSD` (0ms) → TV Scanner → Binance fallback | **Tier 0** → **Tier 1** → **Tier 2A / 2B** → **Tier 3 (VIP)** | Tức thì theo tick WS + Cron backup 3s |
-| **2. SMC Order Blocks + NWE** | `NWE H1` + `OB M15/M30/H1/H4` + `Nến M15` | Binance `PAXGUSDT` | **Tier 1** → **Tier 2 (MTF)** → **Tier 3 (VIP)** | Cron 15s |
+| **2. SMC Order Blocks + NWE** | `NWE H1` + `OB M15/M30/H1/H4` + `Nến M15` | TradingView WS `TVC:GOLD` (500 nến/khung, 0ms) → Binance fallback | **Tier 1** → **Tier 2 (MTF)** → **Tier 3 (VIP)** | Cron 15s |
+| **3. Siêu Hợp Lưu (TIER SSS)** | `BB+ATR M5 (Tier 3)` + `SMC+NWE M15 (Tier 3)` | Kết hợp 2 luồng qua `SuperTierService` | **👑💎🔥🔥🔥 TIER SSS** *(cùng chiều trong cửa sổ 20 phút)* | Tức thì khi trụ cột thứ 2 khớp |
 | **3. RSI Vàng đa khung** | `M1, M5, M15, M30, H1, H4, D1` | TradingView / Binance | Không phân Tier lửa — theo ngưỡng `70/30`, `75/25`, `80/20` | Cron 25s |
 | **4. Price Alert** | Real-time | TradingView / Binance | Không phân Tier — báo 1 lần khi chạm giá mục tiêu | Cron 12s |
 | **5. Tin tức Kinh tế Vĩ mô** | Real-time | ForexFactory | Phân theo độ nóng: 🔴 Cao (`1`), 🟠 Trung bình (`0`), 🟡 Thấp (`-1`) | Adaptive 4s–30s |
@@ -134,6 +135,22 @@ Hệ thống SMC + NWE được thiết kế đồng bộ **3 tầng rõ ràng (
   - **Mép vùng hợp lưu:** `Math.max(nweH1.upperBand, primaryOb.bottom)` (SELL) / `Math.min(nweH1.lowerBand, primaryOb.top)` (BUY).
   - **SL gợi ý:** Ngoài mép khối OB chính + `0.5 * ATR(14) M15`.
   - **TP1:** Đường Kernel trung tâm của NWE H1.
+
+---
+
+## 3B. Cấp Tối Thượng — 👑💎🔥🔥🔥 TIER SSS (Siêu Hợp Lưu)
+
+> **Code nguồn:** `src/indicator/super-tier-classifier.ts` (`evaluateTierSss`, `shouldSuppressDuplicateSss`) & `src/common/super-tier.service.ts`.
+
+- **Điều kiện kích hoạt:**
+  1. Cả **BB+ATR M5** và **SMC+NWE MTF** đều đạt **Tier 3 (VIP)**.
+  2. **Cùng chiều tuyệt đối** (`BUY` với `BUY`, hoặc `SELL` với `SELL`).
+  3. Khoảng cách thời gian giữa 2 tín hiệu nằm trong cửa sổ trượt **≤ 20 phút** (`SSS_CONFLUENCE_WINDOW_MS`).
+- **Kế hoạch vào lệnh hợp nhất:**
+  - **Entry tham chiếu:** Giá thị trường của tín hiệu khớp sau cùng.
+  - **SL an toàn nhất:** `Math.max(SL_BB_ATR, SL_SMC_NWE)` với SELL; `Math.min(SL_BB_ATR, SL_SMC_NWE)` với BUY.
+  - **TP1:** `BB Middle (M5)` | **TP2:** `NWE H1 Kernel`.
+- **Chống spam & Phân quyền:** Chặn trùng cặp `(bbCandleTimeMs, smcCandleTimeMs)` hoặc cooldown **15 phút cùng chiều**; gửi song song batch 25 users tới toàn bộ VIP subscribers (`tier2AlertEnabled !== false`).
 
 ---
 

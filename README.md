@@ -19,11 +19,15 @@ Hệ thống sở hữu **Pure Signal Engines** độc lập (dễ kiểm thử 
 * **Chống rút râu ảo & Quản trị rủi ro:** Chỉ kích hoạt bộ lọc râu từ **phút thứ 4 trở đi (≥ 80% thời gian nến M5)** hoặc trên nến vừa đóng (`prevCandle`), tự động tính Entry, SL (`= 1 ATR`), TP1 (`BB Middle`), TP2 (`1:2 R:R`) và hỗ trợ lọc Daily Trend Bias (`BUY_ONLY`, `SELL_ONLY`, `BOTH`).
 
 ### 2. 🌊 SMC Order Blocks + Nadaraya-Watson Envelope (NWE) — Hợp lưu Chéo Khung (MTF)
-* **Thuật toán:** NWE Gaussian Kernel Regression (`h=8, mult=3.0`) + Dynamic S/R kết hợp phát hiện các khối **Supply / Demand Order Blocks** chưa triệt tiêu (Unmitigated) trên 6 khung (`M5, M15, M30, H1, H4, D1`).
+* **Nguồn dữ liệu chuẩn TradingView:** Kết nối 1 WebSocket đa khung trực tiếp `TVC:GOLD` (500 nến/khung cho `M5, M15, M30, H1, H4, D1`, 0ms latency) với công thức NWE khớp chính xác Pine Script v5 (`h=8, mult=3.0`, repainting 500 bars), kèm fallback Binance.
 * **Hệ thống 3 tầng đồng bộ (Pure Engine `src/smc/smc-mtf-classifier.ts`):**
   * 🔔 **Tier 1:** Chạm NWE đơn lẻ hoặc OB đơn lẻ trên từng khung.
   * 🔥🔥 **Tier 2 (MTF Confluence):** Chạm biên **NWE H1** **ĐỒNG THỜI** giao cắt ≥ 1 khối **Order Block** từ các khung **`M15`, `M30`, `H1`, `H4`** (ưu tiên khối chính `H4 > H1 > M30 > M15`, tự động chống trùng với hợp lưu đơn khung H1).
   * 🔥🔥🔥 **Tier 3 (VIP):** Thỏa Tier 2 **+** xuất hiện **nến rút râu từ chối khung M15** (`detectZoneRejectionWick` lọc theo **`ATR(14)` M15** — hỗ trợ bắt râu ngay trong lòng OB rộng miễn không phá vỡ mép ngoài `ob.top`/`ob.bottom`, chống rút râu ảo ≥ phút thứ 12 của nến M15).
+
+### 2B. 👑💎🔥🔥🔥 TIER SSS — Siêu Hợp Lưu Tối Thượng
+* Tự động kích hoạt qua `SuperTierService` (`src/common/super-tier.service.ts` + pure engine `src/indicator/super-tier-classifier.ts`) khi **cả `BB+ATR M5 (Tier 3)` và `SMC+NWE M15 (Tier 3)` cùng xuất hiện 1 chiều trong cửa sổ 20 phút**.
+* Hợp nhất kế hoạch vào lệnh: **SL an toàn nhất** (`max` cho SELL / `min` cho BUY giữa 2 hệ thống), **TP1 (`BB Middle M5`)**, **TP2 (`NWE H1 Kernel`)**, kèm khóa chống trùng theo cặp nến và cooldown 15 phút cùng chiều.
 
 ### 3. 🔔 Cảnh báo Giá, 🟡 RSI Vàng Đa Khung & 📰 Kinh tế Vĩ mô
 * **Price Alert (`/alert`):** Cảnh báo chạm mốc giá mục tiêu tức thì cho Vàng và Crypto (Cron 12s).
@@ -94,7 +98,7 @@ npm run prisma:generate
 # 2. Đồng bộ schema lên PostgreSQL
 npm run prisma:push
 
-# 3. Build TypeScript & chạy toàn bộ unit tests (28/28 tests)
+# 3. Build TypeScript & chạy toàn bộ unit tests (36/36 tests)
 npm run build
 npm test
 
