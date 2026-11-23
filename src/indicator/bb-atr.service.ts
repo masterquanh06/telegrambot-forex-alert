@@ -14,7 +14,11 @@ import {
   CreateBbAtrAlertResult,
   ActiveBbAtrAlertDetail,
 } from './bb-atr.interface';
-import { LiquiditySweepService, SweepSignal } from '../services/liquiditySweep';
+import {
+  classifySignalTier,
+  normalizeCandleTimeMs,
+  M5_DURATION_MS,
+} from './signal-classifier';
 
 @Injectable()
 export class BbAtrService implements OnModuleInit, OnModuleDestroy {
@@ -82,12 +86,29 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     D1: '1 Ngày (D1)',
   };
 
+  readonly timeframeDurationMsMap: Record<EmaTimeframe, number> = {
+    M1: 60 * 1000,
+    M5: 5 * 60 * 1000,
+    M15: 15 * 60 * 1000,
+    M30: 30 * 60 * 1000,
+    H1: 60 * 60 * 1000,
+    H4: 4 * 60 * 60 * 1000,
+    D1: 24 * 60 * 60 * 1000,
+  };
+
   // Quản lý trạng thái Global Auto-Scanner cho XAU/USD M5 để chống spam tin nhắn
   private lastGlobalSignal: BbAtrSignalType = 'NORMAL';
   private lastGlobalAlertTime = 0;
   private lastGlobalAlertPrice = 0;
   private lastAlertTier = 0;
   private scanTickCount = 0;
+
+  // Mutex/lock chống Race Condition giữa TradingView WebSocket callback và Cron 3s
+  private isCheckingGlobalXau = false;
+
+  // Chống bắn trùng cho tín hiệu nến rút râu M5 (vẫn cho phép upgrade Tier 2B -> Tier 3 trên cùng 1 nến)
+  private lastWickAlertCandleTime = 0;
+  private lastWickAlertTier = 0;
 
   // Cache cấu hình người dùng phòng trường hợp DB chưa migrate cột mới
   private readonly userSettingFallback = new Map<string, boolean>();
@@ -108,7 +129,6 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
-    private readonly liquiditySweepService: LiquiditySweepService,
   ) {}
 
   onModuleInit() {
@@ -266,53 +286,55 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       const atr = this.calculateAtr(this.liveCandles, 14);
       const rsi = this.calculateRsi(closes, 14);
 
-      const upperEntry = bb.upper + atr;
-      const lowerEntry = bb.lower - atr;
       const last = this.liveCandles[this.liveCandles.length - 1];
-      const price = last.close;
-      const high = last.high;
-      const low = last.low;
+      const prevCandle = this.liveCandles.length >= 2 ? this.liveCandles[this.liveCandles.length - 2] : undefined;
+      const now = Date.now();
+      const candleTime = normalizeCandleTimeMs(last.time);
 
-      const isTouchUpper = price >= bb.upper || high >= bb.upper;
-      const isTouchLower = price <= bb.lower || low <= bb.lower;
-      const isRsiOverbought = rsi >= 70;
-      const isRsiOversold = rsi <= 30;
+      let classified = classifySignalTier({
+        price: last.close,
+        high: last.high,
+        low: last.low,
+        bbUpper: bb.upper,
+        bbLower: bb.lower,
+        atr,
+        rsi,
+        candle: last,
+        prevCandle,
+        nowMs: now,
+        candleDurationMs: M5_DURATION_MS,
+      });
 
-      const isEntrySell = price >= upperEntry || high >= upperEntry;
-      const isEntryBuy = price <= lowerEntry || low <= lowerEntry;
-
-      let signal: BbAtrSignalType = 'NORMAL';
-      let alertTier: 0 | 1 | 2 | 3 = 0;
-
-      // 1. Phía BÁN (Sell):
-      // - Tier 1 & Tier 2: Giá bung chạm/vượt Bands Upper + ATR(14)
-      if (isEntrySell) {
-        signal = 'ENTRY_SELL';
-        alertTier = isRsiOverbought ? 2 : 1; // 🔥🔥 Tier 2 nếu có RSI >= 70, ngược lại 🔥 Tier 1
+      const isWickSignal =
+        classified.tierReason === 'TIER_2B_M5_WICK' || classified.tierReason === 'TIER_3_M5_WICK';
+      if (
+        isWickSignal &&
+        classified.rejectionCandleTime !== undefined &&
+        classified.rejectionCandleTime <= this.lastWickAlertCandleTime &&
+        classified.alertTier <= this.lastWickAlertTier
+      ) {
+        if (classified.rejectionCandleTime < candleTime) {
+          // Nến rút râu từ prevCandle đã được báo rồi -> đánh giá lại nến hiện tại không dùng prevCandle
+          classified = classifySignalTier({
+            price: last.close,
+            high: last.high,
+            low: last.low,
+            bbUpper: bb.upper,
+            bbLower: bb.lower,
+            atr,
+            rsi,
+            nowMs: now,
+            candleDurationMs: M5_DURATION_MS,
+          });
+        } else {
+          return;
+        }
       }
-      // - Chạm dải trên BB thông thường:
-      else if (isTouchUpper) {
-        signal = isRsiOverbought ? 'SELL_CONFLUENCE' : 'TOUCH_UPPER_BB';
-        alertTier = 0; // Chạm dải BB bình thường (không đốm lửa)
-      }
-      // 2. Phía MUA (Buy):
-      // - Tier 1 & Tier 2: Giá đâm thủng Bands Lower - ATR(14)
-      else if (isEntryBuy) {
-        signal = 'ENTRY_BUY';
-        alertTier = isRsiOversold ? 2 : 1; // 🔥🔥 Tier 2 nếu có RSI <= 30, ngược lại 🔥 Tier 1
-      }
-      // - Chạm dải dưới BB thông thường:
-      else if (isTouchLower) {
-        signal = isRsiOversold ? 'BUY_CONFLUENCE' : 'TOUCH_LOWER_BB';
-        alertTier = 0; // Chạm dải BB bình thường (không đốm lửa)
-      }
 
-      // Kích hoạt bắn cảnh báo khi có tín hiệu chạm dải BB hoặc khớp Entry (+/- ATR)
-      if (signal !== 'NORMAL') {
-        const now = Date.now();
-        const candleTime = last.time;
+      // Kích hoạt bắn cảnh báo khi có tín hiệu chạm dải BB hoặc khớp Entry (+/- ATR) hoặc rút râu M5
+      if (classified.signal !== 'NORMAL') {
         const isNewCandle = candleTime > this.lastAlertCandleTime;
-        const isUpgradeSignal = alertTier > (this.lastAlertTier || 0);
+        const isUpgradeSignal = classified.alertTier > (this.lastAlertTier || 0);
         const isCooldownPassed = now - this.lastGlobalAlertTime > 90 * 1000;
 
         if (isNewCandle || isUpgradeSignal || isCooldownPassed) {
@@ -694,10 +716,11 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       const rsi = this.calculateRsi(closes, 14);
 
       const last = this.liveCandles[this.liveCandles.length - 1];
+      const prevCandle = this.liveCandles.length >= 2 ? this.liveCandles[this.liveCandles.length - 2] : undefined;
       const currentPrice = last.close;
       const candleHigh = last.high;
       const candleLow = last.low;
-      const candleTime = last.time;
+      const candleTime = normalizeCandleTimeMs(last.time);
 
       const upperEntry = bb.upper + atr;
       const lowerEntry = bb.lower - atr;
@@ -710,63 +733,19 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       const distToLower = currentPrice - lowerEntry;
       const distToLowerPercent = Number(((distToLower / currentPrice) * 100).toFixed(2));
 
-      const isTouchUpper = currentPrice >= bb.upper || candleHigh >= bb.upper;
-      const isTouchLower = currentPrice <= bb.lower || candleLow <= bb.lower;
-      const isRsiOverbought = rsi >= 70;
-      const isRsiOversold = rsi <= 30;
-
-      let signal: BbAtrSignalType = 'NORMAL';
-      let signalReason = 'Giá đang nằm trong dải dao động an toàn.';
-      let alertTier: 0 | 1 | 2 | 3 = 0;
-
-      // 1. Phía BÁN (Sell):
-      // - Cấp độ Entry gốc (Bands Upper + ATR):
-      if (currentPrice >= upperEntry || candleHigh >= upperEntry) {
-        signal = 'ENTRY_SELL';
-        if (isRsiOverbought) {
-          alertTier = 2; // 🔥🔥 TIER 2: Bands Upper + ATR + RSI >= 70
-          signalReason = `🔥🔥 [TIER 2] HỢP LƯU ENTRY SELL (BB UPPER + ATR) + RSI QUÁ MUA (≥ 70)! Giá ($${currentPrice.toFixed(2)}) đã vượt mốc $${upperEntry.toFixed(2)} và RSI = ${rsi.toFixed(1)}.`;
-        } else {
-          alertTier = 1; // 🔥 TIER 1: Bands Upper + ATR
-          signalReason = `🔥 [TIER 1] KHỚP VÙNG ENTRY SELL (BANDS UPPER + ATR)! Giá ($${currentPrice.toFixed(2)}) đã bung vượt mốc $${upperEntry.toFixed(2)} (RSI: ${rsi.toFixed(1)}).`;
-        }
-      }
-      // - Chạm dải trên BB thông thường:
-      else if (isTouchUpper) {
-        if (isRsiOverbought) {
-          signal = 'SELL_CONFLUENCE';
-          alertTier = 0;
-          signalReason = `Giá chạm dải BB trên ($${bb.upper.toFixed(2)}) và RSI = ${rsi.toFixed(1)} (≥ 70 - Quá Mua).`;
-        } else {
-          signal = 'TOUCH_UPPER_BB';
-          alertTier = 0;
-          signalReason = `Giá chạm dải BB trên ($${bb.upper.toFixed(2)}) (RSI: ${rsi.toFixed(1)}).`;
-        }
-      }
-      // 2. Phía MUA (Buy):
-      // - Cấp độ Entry gốc (Bands Lower - ATR):
-      else if (currentPrice <= lowerEntry || candleLow <= lowerEntry) {
-        signal = 'ENTRY_BUY';
-        if (isRsiOversold) {
-          alertTier = 2; // 🔥🔥 TIER 2: Bands Lower - ATR + RSI <= 30
-          signalReason = `🔥🔥 [TIER 2] HỢP LƯU ENTRY BUY (BB LOWER - ATR) + RSI QUÁ BÁN (≤ 30)! Giá ($${currentPrice.toFixed(2)}) đâm thủng mốc $${lowerEntry.toFixed(2)} và RSI = ${rsi.toFixed(1)}.`;
-        } else {
-          alertTier = 1; // 🔥 TIER 1: Bands Lower - ATR
-          signalReason = `🔥 [TIER 1] KHỚP VÙNG ENTRY BUY (BANDS LOWER - ATR)! Giá ($${currentPrice.toFixed(2)}) đã đâm thủng mốc $${lowerEntry.toFixed(2)} (RSI: ${rsi.toFixed(1)}).`;
-        }
-      }
-      // - Chạm dải dưới BB thông thường:
-      else if (isTouchLower) {
-        if (isRsiOversold) {
-          signal = 'BUY_CONFLUENCE';
-          alertTier = 0;
-          signalReason = `Giá chạm dải BB dưới ($${bb.lower.toFixed(2)}) và RSI = ${rsi.toFixed(1)} (≤ 30 - Quá Bán).`;
-        } else {
-          signal = 'TOUCH_LOWER_BB';
-          alertTier = 0;
-          signalReason = `Giá chạm dải BB dưới ($${bb.lower.toFixed(2)}) (RSI: ${rsi.toFixed(1)}).`;
-        }
-      }
+      const classified = classifySignalTier({
+        price: currentPrice,
+        high: candleHigh,
+        low: candleLow,
+        bbUpper: bb.upper,
+        bbLower: bb.lower,
+        atr,
+        rsi,
+        candle: last,
+        prevCandle,
+        nowMs: Date.now(),
+        candleDurationMs: this.timeframeDurationMsMap[timeframe] || M5_DURATION_MS,
+      });
 
       return {
         symbol: symbol.toUpperCase(),
@@ -785,11 +764,13 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         bbLower: Number(bb.lower.toFixed(4)),
         atrPeriod,
         atrValue: Number(atr.toFixed(2)),
-        alertTier,
+        alertTier: classified.alertTier,
+        tierReason: classified.tierReason,
+        rejectionCandleTime: classified.rejectionCandleTime,
         rsiPeriod: 14,
         rsiValue: rsi,
-        isRsiOversold,
-        isRsiOverbought,
+        isRsiOversold: classified.isRsiOversold,
+        isRsiOverbought: classified.isRsiOverbought,
         upperEntry: Number(upperEntry.toFixed(4)),
         lowerEntry: Number(lowerEntry.toFixed(4)),
         sellSl: Number(sellSl.toFixed(4)),
@@ -799,8 +780,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         distToUpperPercent,
         distToLower: Number(distToLower.toFixed(4)),
         distToLowerPercent,
-        signal,
-        signalReason,
+        signal: classified.signal,
+        signalReason: classified.signalReason,
         updatedAt: new Date(),
       };
     }
@@ -828,22 +809,14 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         const distToLower = currentPrice - lowerEntry;
         const distToLowerPercent = Number(((distToLower / currentPrice) * 100).toFixed(2));
 
-        let signal: BbAtrSignalType = 'NORMAL';
-        let signalReason = 'Giá đang nằm trong dải dao động an toàn.';
-
-        if (currentPrice >= upperEntry || candleHigh >= upperEntry) {
-          signal = 'ENTRY_SELL';
-          signalReason = `Giá ($${currentPrice.toFixed(2)}) đã bung lên vượt dải trên thêm 1 ATR ($${upperEntry.toFixed(2)} = BB Upper + ATR). Vùng Entry Bán cực hạn!`;
-        } else if (currentPrice >= bbUpper || candleHigh >= bbUpper) {
-          signal = 'TOUCH_UPPER_BB';
-          signalReason = `Giá ($${currentPrice.toFixed(2)}) đã chạm/vượt dải trên Bollinger Bands ($${bbUpper.toFixed(2)}).`;
-        } else if (currentPrice <= lowerEntry || candleLow <= lowerEntry) {
-          signal = 'ENTRY_BUY';
-          signalReason = `Giá ($${currentPrice.toFixed(2)}) đã đâm thủng dải dưới thêm 1 ATR ($${lowerEntry.toFixed(2)} = BB Lower - ATR). Vùng Entry Mua cực hạn!`;
-        } else if (currentPrice <= bbLower || candleLow <= bbLower) {
-          signal = 'TOUCH_LOWER_BB';
-          signalReason = `Giá ($${currentPrice.toFixed(2)}) đã chạm/thủng dải dưới Bollinger Bands ($${bbLower.toFixed(2)}).`;
-        }
+        const classified = classifySignalTier({
+          price: currentPrice,
+          high: candleHigh,
+          low: candleLow,
+          bbUpper,
+          bbLower,
+          atr: atrValue,
+        });
 
         return {
           symbol: symbol.toUpperCase(),
@@ -860,6 +833,9 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
           bbLower: Number(bbLower.toFixed(4)),
           atrPeriod,
           atrValue: Number(atrValue.toFixed(4)),
+          alertTier: classified.alertTier,
+          tierReason: classified.tierReason,
+          rejectionCandleTime: classified.rejectionCandleTime,
           upperEntry: Number(upperEntry.toFixed(4)),
           lowerEntry: Number(lowerEntry.toFixed(4)),
           sellSl: Number(sellSl.toFixed(4)),
@@ -869,8 +845,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
           distToUpperPercent,
           distToLower: Number(distToLower.toFixed(4)),
           distToLowerPercent,
-          signal,
-          signalReason,
+          signal: classified.signal,
+          signalReason: classified.signalReason,
           updatedAt: new Date(),
         };
       }
@@ -897,6 +873,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     const slDistance = atr;
 
     const lastCandle = candles[candles.length - 1];
+    const prevCandle = candles.length >= 2 ? candles[candles.length - 2] : undefined;
 
     // Tính khoảng cách
     const distToUpper = upperEntry - currentPrice;
@@ -904,69 +881,26 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     const distToLower = currentPrice - lowerEntry;
     const distToLowerPercent = Number(((distToLower / currentPrice) * 100).toFixed(2));
 
-    const isTouchUpper = currentPrice >= bb.upper || lastCandle.high >= bb.upper;
-    const isTouchLower = currentPrice <= bb.lower || lastCandle.low <= bb.lower;
-    const isRsiOverbought = rsi >= 70;
-    const isRsiOversold = rsi <= 30;
-
-    let signal: BbAtrSignalType = 'NORMAL';
-    let signalReason = 'Giá đang nằm trong dải dao động an toàn.';
-    let alertTier: 0 | 1 | 2 | 3 = 0;
-
-    // 1. Phía BÁN (Sell):
-    // - Cấp độ Entry gốc (Bands Upper + ATR):
-    if (currentPrice >= upperEntry || lastCandle.high >= upperEntry) {
-      signal = 'ENTRY_SELL';
-      if (isRsiOverbought) {
-        alertTier = 2; // 🔥🔥 TIER 2: Bands Upper + ATR + RSI >= 70
-        signalReason = `🔥🔥 [TIER 2] HỢP LƯU ENTRY SELL (BB UPPER + ATR) + RSI QUÁ MUA (≥ 70)! Giá ($${currentPrice.toFixed(2)}) đã bung vượt mốc $${upperEntry.toFixed(2)} và RSI = ${rsi.toFixed(1)}.`;
-      } else {
-        alertTier = 1; // 🔥 TIER 1: Bands Upper + ATR
-        signalReason = `🔥 [TIER 1] KHỚP VÙNG ENTRY SELL (BANDS UPPER + ATR)! Giá ($${currentPrice.toFixed(2)}) đã bung vượt mốc $${upperEntry.toFixed(2)} (RSI: ${rsi.toFixed(1)}).`;
-      }
-    }
-    // - Chạm dải trên BB thông thường:
-    else if (isTouchUpper) {
-      if (isRsiOverbought) {
-        signal = 'SELL_CONFLUENCE';
-        alertTier = 0;
-        signalReason = `Giá chạm dải BB trên ($${bb.upper.toFixed(2)}) và RSI = ${rsi.toFixed(1)} (≥ 70 - Quá Mua).`;
-      } else {
-        signal = 'TOUCH_UPPER_BB';
-        alertTier = 0;
-        signalReason = `Giá chạm dải BB trên ($${bb.upper.toFixed(2)}) (RSI: ${rsi.toFixed(1)}).`;
-      }
-    }
-    // 2. Phía MUA (Buy):
-    // - Cấp độ Entry gốc (Bands Lower - ATR):
-    else if (currentPrice <= lowerEntry || lastCandle.low <= lowerEntry) {
-      signal = 'ENTRY_BUY';
-      if (isRsiOversold) {
-        alertTier = 2; // 🔥🔥 TIER 2: Bands Lower - ATR + RSI <= 30
-        signalReason = `🔥🔥 [TIER 2] HỢP LƯU ENTRY BUY (BB LOWER - ATR) + RSI QUÁ BÁN (≤ 30)! Giá ($${currentPrice.toFixed(2)}) đã đâm thủng mốc $${lowerEntry.toFixed(2)} và RSI = ${rsi.toFixed(1)}.`;
-      } else {
-        alertTier = 1; // 🔥 TIER 1: Bands Lower - ATR
-        signalReason = `🔥 [TIER 1] KHỚP VÙNG ENTRY BUY (BANDS LOWER - ATR)! Giá ($${currentPrice.toFixed(2)}) đã đâm thủng mốc $${lowerEntry.toFixed(2)} (RSI: ${rsi.toFixed(1)}).`;
-      }
-    }
-    // - Chạm dải dưới BB thông thường:
-    else if (isTouchLower) {
-      if (isRsiOversold) {
-        signal = 'BUY_CONFLUENCE';
-        alertTier = 0;
-        signalReason = `Giá chạm dải BB dưới ($${bb.lower.toFixed(2)}) và RSI = ${rsi.toFixed(1)} (≤ 30 - Quá Bán).`;
-      } else {
-        signal = 'TOUCH_LOWER_BB';
-        alertTier = 0;
-        signalReason = `Giá chạm dải BB dưới ($${bb.lower.toFixed(2)}) (RSI: ${rsi.toFixed(1)}).`;
-      }
-    }
+    const classified = classifySignalTier({
+      price: currentPrice,
+      high: lastCandle.high,
+      low: lastCandle.low,
+      bbUpper: bb.upper,
+      bbLower: bb.lower,
+      atr,
+      rsi,
+      candle: lastCandle,
+      prevCandle,
+      nowMs: Date.now(),
+      candleDurationMs: this.timeframeDurationMsMap[timeframe] || M5_DURATION_MS,
+    });
 
     return {
       symbol: symbol.toUpperCase(),
       displaySymbol,
       assetType,
       timeframe,
+      candleTime: normalizeCandleTimeMs(lastCandle.time),
       currentPrice: Number(currentPrice.toFixed(4)),
       candleHigh: Number(lastCandle.high.toFixed(4)),
       candleLow: Number(lastCandle.low.toFixed(4)),
@@ -979,9 +913,11 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       atrValue: Number(atr.toFixed(2)),
       rsiPeriod: 14,
       rsiValue: rsi,
-      isRsiOversold,
-      isRsiOverbought,
-      alertTier,
+      isRsiOversold: classified.isRsiOversold,
+      isRsiOverbought: classified.isRsiOverbought,
+      alertTier: classified.alertTier,
+      tierReason: classified.tierReason,
+      rejectionCandleTime: classified.rejectionCandleTime,
       upperEntry: Number(upperEntry.toFixed(4)),
       lowerEntry: Number(lowerEntry.toFixed(4)),
       sellSl: Number(sellSl.toFixed(4)),
@@ -991,8 +927,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       distToUpperPercent,
       distToLower: Number(distToLower.toFixed(4)),
       distToLowerPercent,
-      signal,
-      signalReason,
+      signal: classified.signal,
+      signalReason: classified.signalReason,
       updatedAt: new Date(),
     };
   }
@@ -1251,13 +1187,54 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
+   * Gửi tin nhắn Telegram song song theo batch (20-25 users/lượt) dùng Promise.allSettled()
+   * để giảm độ trễ broadcast và log rõ chatId gặp lỗi.
+   */
+  private async broadcastTelegramInBatches(
+    chatIds: string[],
+    message: string,
+    extra?: any,
+    batchSize = 25,
+  ): Promise<number> {
+    let sentCount = 0;
+
+    for (let i = 0; i < chatIds.length; i += batchSize) {
+      const batch = chatIds.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map((chatId) => this.telegramService.sendMessage(chatId, message, extra)),
+      );
+
+      results.forEach((res, idx) => {
+        if (res.status === 'fulfilled') {
+          sentCount++;
+        } else {
+          const failedChatId = batch[idx];
+          const reasonMsg = res.reason?.message || String(res.reason);
+          this.logger.warn(`Lỗi gửi BB+ATR alert tới chatId=${failedChatId}: ${reasonMsg}`);
+        }
+      });
+    }
+
+    return sentCount;
+  }
+
+  /**
    * VÒNG LẶP GLOBAL AUTO-SCANNER: Quét liên tục XAU/USD trên khung M5
-   * Tự động phát hiện khi giá chạm 2 dải BB (Upper/Lower) HOẶC chạm ngưỡng Entry mở rộng (+/- 1 ATR)
+   * Tự động phát hiện khi giá chạm 2 dải BB (Upper/Lower), khớp ngưỡng Entry (+/- 1 ATR) hoặc nến rút râu M5
    */
   async checkGlobalXauM5Alert(): Promise<boolean> {
+    // Mutex/lock chống Race Condition giữa WebSocket callback và Cron 3s
+    if (this.isCheckingGlobalXau) {
+      return false;
+    }
+    this.isCheckingGlobalXau = true;
+
     try {
       const state = await this.getBbAtrState('XAU', 'M5');
       const now = Date.now();
+      const candleTime = state.candleTime
+        ? normalizeCandleTimeMs(state.candleTime)
+        : Math.floor(now / M5_DURATION_MS) * M5_DURATION_MS;
 
       // Log định kỳ mỗi 60 giây vào terminal để user luôn thấy bot đang hoạt động
       if (this.scanTickCount % 20 === 0) {
@@ -1268,6 +1245,40 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         );
       }
       this.scanTickCount++;
+
+      // Chống bắn trùng cho tín hiệu nến rút râu (Tier 2B / Tier 3):
+      // Chỉ bỏ qua nếu rejectionCandleTime <= lastWickAlertCandleTime VÀ alertTier <= lastWickAlertTier
+      // (cùng 1 cây nến vẫn cho phép upgrade Tier 2B -> Tier 3, nhưng không lặp lại ở đầu nến tiếp theo)
+      const isWickSignal =
+        state.tierReason === 'TIER_2B_M5_WICK' || state.tierReason === 'TIER_3_M5_WICK';
+      if (
+        isWickSignal &&
+        state.rejectionCandleTime !== undefined &&
+        state.rejectionCandleTime <= this.lastWickAlertCandleTime &&
+        (state.alertTier || 0) <= this.lastWickAlertTier
+      ) {
+        if (state.rejectionCandleTime < candleTime) {
+          // Tín hiệu rút râu đến từ prevCandle đã được báo -> đánh giá lại nến hiện tại không dùng prevCandle
+          const reclassified = classifySignalTier({
+            price: state.currentPrice,
+            high: state.candleHigh,
+            low: state.candleLow,
+            bbUpper: state.bbUpper,
+            bbLower: state.bbLower,
+            atr: state.atrValue,
+            rsi: state.rsiValue,
+            nowMs: now,
+            candleDurationMs: M5_DURATION_MS,
+          });
+          state.signal = reclassified.signal;
+          state.alertTier = reclassified.alertTier;
+          state.tierReason = reclassified.tierReason;
+          state.signalReason = reclassified.signalReason;
+          state.rejectionCandleTime = undefined;
+        } else {
+          return false;
+        }
+      }
 
       // Xử lý khi giá quay lại trong dải dao động an toàn
       if (state.signal === 'NORMAL') {
@@ -1294,34 +1305,10 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         state.signal === 'TOUCH_LOWER_BB' ||
         (state.signal as any) === 'BUY';
 
-      // KIỂM TRA QUÉT THANH KHOẢN (LIQUIDITY SWEEP) KHUNG M15 CHO TÍN HIỆU M5
-      const expectedDirection = isSellSide ? 'SELL' : 'BUY';
-      let sweepSignal: SweepSignal = { hasSweep: false };
-      try {
-        const m15Data = await this.fetchCandles('XAU', 'M15', 100);
-        if (m15Data?.candles && this.liveCandles.length > 0) {
-          sweepSignal = this.liquiditySweepService.checkRecentSweep(
-            this.liveCandles,
-            m15Data.candles,
-            expectedDirection,
-            state.atrValue,
-          );
-        }
-      } catch (e: any) {
-        this.logger.debug(`Không thể quét liquidity sweep M15: ${e.message}`);
-      }
-
-      state.sweepSignal = sweepSignal;
-      // NẾU CÓ QUÉT THANH KHOẢN -> NÂNG CẤP LÊN TIER 3 (🔥🔥🔥 3 ĐỐM LỬA)
-      if (sweepSignal.hasSweep) {
-        state.alertTier = 3;
-      }
-
       // Quản lý cảnh báo theo từng nến M5:
       // 1. Nến M5 MỚI: BÁO NGAY!
       // 2. CÙNG NẾN: Nâng cấp Tier (0 -> 1 -> 2 -> 3): BÁO NÂNG CẤP NGAY!
       // 3. CÙNG NẾN: Nếu duy trì ngoài dải sau 90 giây cooldown -> Báo nhắc lại!
-      const candleTime = state.candleTime || Math.floor(now / (5 * 60 * 1000)) * (5 * 60 * 1000);
       const isNewCandle = candleTime > this.lastAlertCandleTime;
       const isUpgradeSignal = (state.alertTier || 0) > (this.lastAlertTier || 0);
       const isCooldownPassed = now - this.lastGlobalAlertTime > 90 * 1000;
@@ -1343,14 +1330,19 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         this.lastGlobalAlertPrice = state.currentPrice;
         this.lastAlertTier = state.alertTier || 0;
 
-        if (sweepSignal.hasSweep && sweepSignal.pool?.id) {
-          this.liquiditySweepService.markPoolAsSwept(sweepSignal.pool.id);
+        // Cập nhật trạng thái chống trùng cho nến rút râu (áp dụng cho cả >= 80% thời gian nến lẫn prevCandle)
+        if (
+          (state.tierReason === 'TIER_2B_M5_WICK' || state.tierReason === 'TIER_3_M5_WICK') &&
+          state.rejectionCandleTime !== undefined
+        ) {
+          this.lastWickAlertCandleTime = state.rejectionCandleTime;
+          this.lastWickAlertTier = state.alertTier || 0;
         }
 
-        // TIER 3 (VIP - CÓ QUÉT THANH KHOẢN):
+        // TIER 3 (VIP - BB ± ATR + NẾN RÚT RÂU M5):
         // Nếu user BẬT Tier VIP -> Báo cho user (kể cả user tắt cảnh báo BB hay tắt NWE/SMC)!
         // Nếu user TẮT riêng Tier VIP -> Không gửi cho user đó.
-        // TIER 0, 1, 2: Gửi cho người dùng có BẬT cảnh báo BB
+        // TIER 0, 1, 2 (bao gồm cả Tier 2A và Tier 2B): Gửi cho người dùng có BẬT cảnh báo BB
         const subscribers =
           state.alertTier === 3
             ? await this.getAllRegisteredUsersForTier2()
@@ -1363,36 +1355,49 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
         const alertMessage = this.renderAlertMessage(state, state.signal);
 
-        let sentCount = 0;
-        for (const sub of subscribers) {
-          // Với Tier 0, 1, 2: kiểm tra bộ lọc xu hướng trong ngày (Bias)
-          if (state.alertTier !== 3) {
-            if (isSellSide && sub.bias === 'BUY_ONLY') {
-              continue;
-            }
-            if (isBuySide && sub.bias === 'SELL_ONLY') {
-              continue;
-            }
-          }
+        // Với Tier 0, 1, 2 (bao gồm Tier 2A & 2B): lọc theo Daily Trend Bias
+        const eligibleChatIds = subscribers
+          .filter((sub) => {
+            if (state.alertTier === 3) return true;
+            if (isSellSide && sub.bias === 'BUY_ONLY') return false;
+            if (isBuySide && sub.bias === 'SELL_ONLY') return false;
+            return true;
+          })
+          .map((sub) => sub.chatId);
 
-          try {
-            await this.telegramService.sendMessage(sub.chatId, alertMessage, {
-              reply_markup: {
-                inline_keyboard: [
-                  [
-                    { text: '📊 Xem Bảng BB+ATR M5', callback_data: 'bbatr_view:XAU:M5' },
-                    { text: '⚙️ Bật/Tắt Cảnh Báo', callback_data: 'bbatr_toggle' },
-                  ],
+        const sentCount = await this.broadcastTelegramInBatches(
+          eligibleChatIds,
+          alertMessage,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: '📊 Xem Bảng BB+ATR M5', callback_data: 'bbatr_view:XAU:M5' },
+                  { text: '⚙️ Bật/Tắt Cảnh Báo', callback_data: 'bbatr_toggle' },
                 ],
-              },
-            });
-            sentCount++;
-          } catch (err: any) {
-            this.logger.warn(`Lỗi gửi BB+ATR alert tới ${sub.chatId}: ${err.message}`);
-          }
-        }
+              ],
+            },
+          },
+          25,
+        );
 
-        // Ghi log vào Database
+        // Ghi log vào Database (đảm bảo Entry/SL chuẩn xác cho cả Tier 2B tại biên BB)
+        const isTier2B = state.alertTier === 2 && state.tierReason === 'TIER_2B_M5_WICK';
+        const logEntryTarget = isTier2B
+          ? isSellSide
+            ? state.bbUpper
+            : state.bbLower
+          : isSellSide
+          ? state.upperEntry
+          : state.lowerEntry;
+        const logSlPrice = isTier2B
+          ? isSellSide
+            ? Number((state.bbUpper + state.atrValue).toFixed(4))
+            : Number((state.bbLower - state.atrValue).toFixed(4))
+          : isSellSide
+          ? state.sellSl
+          : state.buySl;
+
         try {
           await this.prisma.executeWithRetry(() =>
             this.prisma.bbAtrAlertLog.create({
@@ -1405,8 +1410,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
                 bbLower: state.bbLower,
                 bbMiddle: state.bbMiddle,
                 atr: state.atrValue,
-                entryTarget: isSellSide ? state.upperEntry : state.lowerEntry,
-                slPrice: isSellSide ? state.sellSl : state.buySl,
+                entryTarget: logEntryTarget,
+                slPrice: logSlPrice,
                 message: state.signalReason,
               },
             }),
@@ -1417,9 +1422,11 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
         const tierName =
           state.alertTier === 3
-            ? 'TIER 3 (SWEEP 🔥🔥🔥)'
+            ? 'TIER 3 (BB±ATR + M5 WICK 🔥🔥🔥)'
             : state.alertTier === 2
-            ? 'TIER 2 (BB+ATR+RSI 🔥🔥)'
+            ? state.tierReason === 'TIER_2B_M5_WICK'
+              ? 'TIER 2B (BB + M5 WICK 🔥🔥)'
+              : 'TIER 2A (BB±ATR + RSI 🔥🔥)'
             : state.alertTier === 1
             ? 'TIER 1 (BB+ATR 🔥)'
             : 'NORMAL TOUCH BB (🔔)';
@@ -1433,6 +1440,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     } catch (err: any) {
       this.logger.error(`Lỗi trong checkGlobalXauM5Alert: ${err.message}`);
       return false;
+    } finally {
+      this.isCheckingGlobalXau = false;
     }
   }
 
@@ -1456,13 +1465,12 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
           `⏱ <b>Thời gian:</b> <code>${new Date().toLocaleTimeString('vi-VN')}</code>`;
 
         const subscribers = await this.getAllUsersForGlobalAlert();
-        let sentCount = 0;
-        for (const sub of subscribers) {
-          try {
-            await this.telegramService.sendMessage(sub.chatId, msg);
-            sentCount++;
-          } catch (e) {}
-        }
+        const sentCount = await this.broadcastTelegramInBatches(
+          subscribers.map((sub) => sub.chatId),
+          msg,
+          undefined,
+          25,
+        );
         return { success: true, message: `Đã phát thông báo khớp lệnh EA tới ${sentCount} người dùng.` };
       }
 
@@ -1527,16 +1535,15 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         (signalType as any) === 'BUY';
       const alertMessage = this.renderAlertMessage(state, signalType);
 
-      let sentCount = 0;
-      for (const sub of subscribers) {
-        if (isSellSide && sub.bias === 'BUY_ONLY') continue;
-        if (isBuySide && sub.bias === 'SELL_ONLY') continue;
+      const eligibleChatIds = subscribers
+        .filter((sub) => {
+          if (isSellSide && sub.bias === 'BUY_ONLY') return false;
+          if (isBuySide && sub.bias === 'SELL_ONLY') return false;
+          return true;
+        })
+        .map((sub) => sub.chatId);
 
-        try {
-          await this.telegramService.sendMessage(sub.chatId, alertMessage);
-          sentCount++;
-        } catch (e) {}
-      }
+      const sentCount = await this.broadcastTelegramInBatches(eligibleChatIds, alertMessage, undefined, 25);
 
       return {
         success: true,
@@ -1586,10 +1593,12 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
             const isSellSide =
               state.signal === 'TOUCH_UPPER_BB' ||
               state.signal === 'ENTRY_SELL' ||
+              state.signal === 'SELL_CONFLUENCE' ||
               (state.signal as any) === 'SELL';
             const isBuySide =
               state.signal === 'TOUCH_LOWER_BB' ||
               state.signal === 'ENTRY_BUY' ||
+              state.signal === 'BUY_CONFLUENCE' ||
               (state.signal as any) === 'BUY';
 
             for (const alert of alerts) {
@@ -1764,10 +1773,28 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
             alert.bbStdDev,
             alert.atrPeriod,
           );
-          if (state.signal === 'SELL') {
-            statusText = `🔴 Chạm điểm BÁN ($${state.upperEntry})`;
-          } else if (state.signal === 'BUY') {
-            statusText = `🟢 Chạm điểm MUA ($${state.lowerEntry})`;
+          if (
+            state.signal === 'SELL' ||
+            state.signal === 'ENTRY_SELL' ||
+            state.signal === 'SELL_CONFLUENCE' ||
+            state.signal === 'TOUCH_UPPER_BB'
+          ) {
+            const targetPrice =
+              state.alertTier === 2 && state.tierReason === 'TIER_2B_M5_WICK'
+                ? state.bbUpper
+                : state.upperEntry;
+            statusText = `🔴 Tín hiệu BÁN (${state.signal} | $${targetPrice})`;
+          } else if (
+            state.signal === 'BUY' ||
+            state.signal === 'ENTRY_BUY' ||
+            state.signal === 'BUY_CONFLUENCE' ||
+            state.signal === 'TOUCH_LOWER_BB'
+          ) {
+            const targetPrice =
+              state.alertTier === 2 && state.tierReason === 'TIER_2B_M5_WICK'
+                ? state.bbLower
+                : state.lowerEntry;
+            statusText = `🟢 Tín hiệu MUA (${state.signal} | $${targetPrice})`;
           } else {
             statusText = `⚪ An toàn (Upper: $${state.upperEntry} | Lower: $${state.lowerEntry})`;
           }
@@ -1887,19 +1914,31 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       second: '2-digit',
     }).format(new Date());
 
+    const isSellSignal =
+      state.signal === 'ENTRY_SELL' ||
+      state.signal === 'SELL_CONFLUENCE' ||
+      state.signal === 'TOUCH_UPPER_BB' ||
+      (state.signal as any) === 'SELL';
+
     let signalBadge = '⚪ VÙNG TRUNG TÍNH (Dao động trong dải)';
     if (state.alertTier === 3) {
-      signalBadge = '🔥🔥🔥 [TIER 3] QUÉT THANH KHOẢN + BB + ATR (VIP)';
+      signalBadge = isSellSignal
+        ? '🔥🔥🔥 [TIER 3 - VIP] BB UPPER + ATR + NẾN RÚT RÂU M5 (SELL)'
+        : '🔥🔥🔥 [TIER 3 - VIP] BB LOWER - ATR + NẾN RÚT RÂU M5 (BUY)';
     } else if (state.alertTier === 2) {
-      signalBadge =
-        state.signal === 'ENTRY_SELL'
-          ? '🔥🔥 [TIER 2] HỢP LƯU ENTRY BÁN (BB UPPER + ATR) + RSI QUÁ MUA (≥ 70)'
-          : '🔥🔥 [TIER 2] HỢP LƯU ENTRY MUA (BB LOWER - ATR) + RSI QUÁ BÁN (≤ 30)';
+      if (state.tierReason === 'TIER_2B_M5_WICK') {
+        signalBadge = isSellSignal
+          ? '🔥🔥 [TIER 2B] NẾN RÚT RÂU M5 TỪ CHỐI TẠI DẢI BB TRÊN (SELL)'
+          : '🔥🔥 [TIER 2B] NẾN RÚT RÂU M5 TỪ CHỐI TẠI DẢI BB DƯỚI (BUY)';
+      } else {
+        signalBadge = isSellSignal
+          ? '🔥🔥 [TIER 2A] HỢP LƯU ENTRY BÁN (BB UPPER + ATR) + RSI QUÁ MUA (≥ 70)'
+          : '🔥🔥 [TIER 2A] HỢP LƯU ENTRY MUA (BB LOWER - ATR) + RSI QUÁ BÁN (≤ 30)';
+      }
     } else if (state.alertTier === 1) {
-      signalBadge =
-        state.signal === 'ENTRY_SELL'
-          ? '🔥 [TIER 1] KHỚP VÙNG ENTRY BÁN: BB UPPER + ATR(14)'
-          : '🔥 [TIER 1] KHỚP VÙNG ENTRY MUA: BB LOWER - ATR(14)';
+      signalBadge = isSellSignal
+        ? '🔥 [TIER 1] KHỚP VÙNG ENTRY BÁN: BB UPPER + ATR(14)'
+        : '🔥 [TIER 1] KHỚP VÙNG ENTRY MUA: BB LOWER - ATR(14)';
     } else if (state.signal === 'SELL_CONFLUENCE') {
       signalBadge = '🎯 CHẠM BB TRÊN + RSI QUÁ MUA (≥ 70)';
     } else if (state.signal === 'BUY_CONFLUENCE') {
@@ -1949,7 +1988,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     msg += `🧭 <b>Lọc xu hướng ngày (Bias):</b> <b>${biasText}</b>\n`;
     if (isGold) {
       msg += `🔔 <b>Cảnh báo tự động XAU M5:</b> <b>${alertStatusText}</b>\n`;
-      msg += `🔥 <b>Cảnh báo Tier 3 (Quét thanh khoản):</b> <b>${isTier2Enabled ? '🟢 ĐANG BẬT (Ưu tiên cao nhất)' : '⚪ ĐÃ TẮT'}</b>\n`;
+      msg += `🔥 <b>Cảnh báo Tier 3 (BB ± ATR + Rút râu M5):</b> <b>${isTier2Enabled ? '🟢 ĐANG BẬT (Ưu tiên cao nhất)' : '⚪ ĐÃ TẮT'}</b>\n`;
     }
 
     return msg;
@@ -1965,12 +2004,30 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       signalType === 'TOUCH_UPPER_BB' ||
       (signalType as any) === 'SELL';
 
-    const entryPrice = isSell ? state.upperEntry : state.lowerEntry;
-    const slPrice = isSell ? state.sellSl : state.buySl;
+    const tier = state.alertTier ?? 0;
+    const isTier3 = tier === 3;
+    const isTier2B = tier === 2 && state.tierReason === 'TIER_2B_M5_WICK';
+
+    // Tier 2B vào lệnh tại biên BB Upper / BB Lower (SL = 1 ATR từ biên BB)
+    // Tier 0, 1, 2A, 3 dùng mốc Entry mở rộng BB Upper + ATR / BB Lower - ATR (SL = 1 ATR)
+    const entryPrice = isTier2B
+      ? isSell
+        ? state.bbUpper
+        : state.bbLower
+      : isSell
+      ? state.upperEntry
+      : state.lowerEntry;
+    const slPrice = isTier2B
+      ? isSell
+        ? Number((state.bbUpper + state.slDistance).toFixed(4))
+        : Number((state.bbLower - state.slDistance).toFixed(4))
+      : isSell
+      ? state.sellSl
+      : state.buySl;
     const tp1Price = state.bbMiddle;
     const tp2Price = isSell
-      ? Number((state.upperEntry - 2 * state.slDistance).toFixed(4))
-      : Number((state.lowerEntry + 2 * state.slDistance).toFixed(4));
+      ? Number((entryPrice - 2 * state.slDistance).toFixed(4))
+      : Number((entryPrice + 2 * state.slDistance).toFixed(4));
 
     const nowStr = new Intl.DateTimeFormat('vi-VN', {
       timeZone: 'Asia/Ho_Chi_Minh',
@@ -1982,70 +2039,98 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       year: 'numeric',
     }).format(new Date());
 
-    const tier = state.alertTier ?? 0;
-    const sweep = state.sweepSignal;
-    const isTier3 = tier === 3 && sweep?.hasSweep && !!sweep.pool;
-
     let headerEmoji = '🔔🔴';
     let headerTitle = 'CẢNH BÁO: GIÁ CHẠM DẢI TRÊN BOLLINGER BANDS (BANDS UPPER)!';
     let actionText = '';
     let adviceText = '';
-    let sweepBlock = '';
 
     // ==========================================
-    // CẤP ĐỘ 3: 🔥🔥🔥 TIER 3 (QUÉT THANH KHOẢN + BB + ATR)
+    // CẤP ĐỘ 3: 🔥🔥🔥 TIER 3 (BB ± ATR + NẾN RÚT RÂU M5)
     // ==========================================
-    if (isTier3 && sweep?.pool) {
+    if (isTier3) {
       headerEmoji = '🔥🔥🔥 ' + (isSell ? '🔴🔴' : '🟢🟢');
-      headerTitle = '[TIER 3 - VIP] QUÉT THANH KHOẢN + CHIẾN LƯỢC BOLLINGER BANDS (20) & ATR (14)';
+      headerTitle = isSell
+        ? '[TIER 3 - VIP] BB UPPER + ATR + NẾN RÚT RÂU M5 TỪ CHỐI MẠNH!'
+        : '[TIER 3 - VIP] BB LOWER - ATR + NẾN RÚT RÂU M5 TỪ CHỐI MẠNH!';
 
-      const poolTypeLabel =
-        sweep.type === 'SELL_SWEEP'
-          ? 'Quét Đỉnh (BSL Sweep -> Canh SELL)'
-          : 'Quét Đáy (SSL Sweep -> Canh BUY)';
-      const majorTag = sweep.pool.isMajorPool ? ' ⭐ [EQH/EQL Bể lớn]' : '';
-      const wickPct = ((sweep.wickRatio || 0) * 100).toFixed(1);
+      const rsiSub = state.rsiValue !== undefined ? `\n  • Chỉ số RSI(14): <code>${state.rsiValue.toFixed(2)}</code>` : '';
 
-      sweepBlock += `🌊 <b>TÍN HIỆU QUÉT THANH KHOẢN THẬT (TRUE LIQUIDITY SWEEP):</b>\n`;
-      sweepBlock += `• 🎯 <b>Loại quét:</b> <b>${poolTypeLabel}</b>\n`;
-      sweepBlock += `• 📍 <b>Mốc bị quét:</b> <code>$${sweep.pool.price.toFixed(2)}</code> <i>(hình thành lúc ${sweep.pool.timeStr} khung M15)</i>${majorTag}\n`;
-      sweepBlock += `• 📏 <b>Độ sâu quét:</b> <code>$${sweep.sweepDepth?.toFixed(2)}</code> (${sweep.sweepDepthAtrRatio} ATR) - Râu nến rút: <b>${wickPct}%</b>\n`;
-      sweepBlock += `• 🛑 <b>Gợi ý SL tối ưu sau râu quét:</b> <code>$${sweep.suggestedSL?.toFixed(2)}</code>\n\n`;
-
-      actionText = isSell
-        ? `🔴 Nến M5 vừa quét thanh khoản đỉnh M15 kết hợp chạm dải BB/ATR tại <code>${this.formatPrice(state.currentPrice, state.assetType)}</code>`
-        : `🟢 Nến M5 vừa quét thanh khoản đáy M15 kết hợp chạm dải BB/ATR tại <code>${this.formatPrice(state.currentPrice, state.assetType)}</code>`;
-
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược [TIER 3 - TỐI THƯỢNG]:</b>\n' +
-        `• Đã có tín hiệu săn thanh khoản (Liquidity Sweep / SFP) của tổ chức: Quét sạch phe breakout và đảo chiều rút râu cực mạnh!\n` +
-        `• Tỷ lệ thắng (Winrate) và R:R của kèo này vượt trội nhất hệ thống. Ưu tiên vào lệnh <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> với SL ngay sau râu nến quét!`;
+      if (isSell) {
+        actionText =
+          `🔴 <b>HỢP LƯU TỐI THƯỢNG TIER 3 — BB UPPER + ATR + NẾN RÚT RÂU M5:</b>\n` +
+          `  1️⃣ <b>Vùng Entry cực hạn:</b> Nến M5 đâm vượt mốc <b>Bands(20) Upper + ATR(14) (${this.formatPrice(state.upperEntry, state.assetType)})</b>\n` +
+          `  2️⃣ <b>Nến rút râu từ chối M5:</b> Đóng thụt ngược vào trong mốc Entry với râu trên mạnh (Giá hiện tại: <code>${this.formatPrice(state.currentPrice, state.assetType)}</code>)${rsiSub}`;
+        adviceText =
+          '💡 <b>Khuyến nghị chiến lược [TIER 3 - VIP]:</b>\n' +
+          '• Xác nhận lực bán từ chối quyết liệt ngay tại vùng quá mua cực đại (BB Upper + ATR + Nến rút râu M5).\n' +
+          '• Tỷ lệ thắng (Winrate) và R:R vượt trội nhất hệ thống. Ưu tiên mở vị thế <b>SELL / SHORT</b> với Stop Loss = 1 ATR.';
+      } else {
+        actionText =
+          `🟢 <b>HỢP LƯU TỐI THƯỢNG TIER 3 — BB LOWER - ATR + NẾN RÚT RÂU M5:</b>\n` +
+          `  1️⃣ <b>Vùng Entry cực hạn:</b> Nến M5 đâm thủng mốc <b>Bands(20) Lower - ATR(14) (${this.formatPrice(state.lowerEntry, state.assetType)})</b>\n` +
+          `  2️⃣ <b>Nến rút râu từ chối M5:</b> Đóng rút chân ngược vào trong mốc Entry với râu dưới mạnh (Giá hiện tại: <code>${this.formatPrice(state.currentPrice, state.assetType)}</code>)${rsiSub}`;
+        adviceText =
+          '💡 <b>Khuyến nghị chiến lược [TIER 3 - VIP]:</b>\n' +
+          '• Xác nhận lực mua bắt đáy quyết liệt ngay tại vùng quá bán cực đại (BB Lower - ATR + Nến rút râu M5).\n' +
+          '• Tỷ lệ thắng (Winrate) và R:R vượt trội nhất hệ thống. Ưu tiên mở vị thế <b>BUY / LONG</b> với Stop Loss = 1 ATR.';
+      }
     }
     // ==========================================
-    // CẤP ĐỘ 2: 🔥🔥 TIER 2 (BB + ATR + RSI CỰC TRỊ)
+    // CẤP ĐỘ 2B: 🔥🔥 TIER 2B (NẾN RÚT RÂU TỪ CHỐI TẠI DẢI BB)
+    // ==========================================
+    else if (isTier2B) {
+      headerEmoji = '🔥🔥 ' + (isSell ? '🔴🔴' : '🟢🟢');
+      headerTitle = isSell
+        ? '[TIER 2B] NẾN RÚT RÂU TỪ CHỐI TẠI DẢI BB TRÊN (BANDS UPPER)!'
+        : '[TIER 2B] NẾN RÚT RÂU TỪ CHỐI TẠI DẢI BB DƯỚI (BANDS LOWER)!';
+
+      const rsiSub = state.rsiValue !== undefined ? `\n  • Chỉ số RSI(14): <code>${state.rsiValue.toFixed(2)}</code>` : '';
+
+      if (isSell) {
+        actionText =
+          `🔴 <b>KHỚP ĐIỀU KIỆN TIER 2B — NẾN RÚT RÂU TỪ CHỐI TẠI DẢI BB (M5):</b>\n` +
+          `  1️⃣ <b>Chạm/vượt dải trên BB:</b> Nến M5 đâm vượt <b>Bands(20) Upper (${this.formatPrice(state.bbUpper, state.assetType)})</b>\n` +
+          `  2️⃣ <b>Nến rút râu từ chối M5:</b> Rút râu trên rõ nét (Pinbar hoặc nến đỏ đảo chiều) và đóng thụt dưới dải BB Upper (Giá hiện tại: <code>${this.formatPrice(state.currentPrice, state.assetType)}</code>)${rsiSub}`;
+        adviceText =
+          '💡 <b>Khuyến nghị chiến lược [TIER 2B - RÚT RÂU TẠI BIÊN BB]:</b>\n' +
+          '• Phe bán đã từ chối giá trực tiếp tại dải biên trên Bollinger Bands bằng nến rút râu xác nhận.\n' +
+          '• Thích hợp canh mở vị thế <b>SELL / SHORT</b> ngay vùng biên BB Upper với quản trị vốn Stop Loss = 1 ATR.';
+      } else {
+        actionText =
+          `🟢 <b>KHỚP ĐIỀU KIỆN TIER 2B — NẾN RÚT RÂU TỪ CHỐI TẠI DẢI BB (M5):</b>\n` +
+          `  1️⃣ <b>Chạm/thủng dải dưới BB:</b> Nến M5 đâm thủng <b>Bands(20) Lower (${this.formatPrice(state.bbLower, state.assetType)})</b>\n` +
+          `  2️⃣ <b>Nến rút râu từ chối M5:</b> Rút chân dưới rõ nét (Pinbar hoặc nến xanh đảo chiều) và đóng thụt lên trên dải BB Lower (Giá hiện tại: <code>${this.formatPrice(state.currentPrice, state.assetType)}</code>)${rsiSub}`;
+        adviceText =
+          '💡 <b>Khuyến nghị chiến lược [TIER 2B - RÚT RÂU TẠI BIÊN BB]:</b>\n' +
+          '• Phe mua đã hấp thụ lực xả và từ chối giá trực tiếp tại dải biên dưới Bollinger Bands bằng nến rút râu xác nhận.\n' +
+          '• Thích hợp canh mở vị thế <b>BUY / LONG</b> ngay vùng biên BB Lower với quản trị vốn Stop Loss = 1 ATR.';
+      }
+    }
+    // ==========================================
+    // CẤP ĐỘ 2A: 🔥🔥 TIER 2A (BB ± ATR + RSI CỰC TRỊ)
     // ==========================================
     else if (tier === 2) {
       headerEmoji = '🔥🔥 ' + (isSell ? '🔴🔴' : '🟢🟢');
       headerTitle = isSell
-        ? '[TIER 2] HỢP LƯU ENTRY SELL (BB UPPER + ATR) + RSI QUÁ MUA (≥ 70)!'
-        : '[TIER 2] HỢP LƯU ENTRY BUY (BB LOWER - ATR) + RSI QUÁ BÁN (≤ 30)!';
+        ? '[TIER 2A] HỢP LƯU ENTRY SELL (BB UPPER + ATR) + RSI CỰC TRỊ (≥ 70)!'
+        : '[TIER 2A] HỢP LƯU ENTRY BUY (BB LOWER - ATR) + RSI CỰC TRỊ (≤ 30)!';
 
       if (isSell) {
         actionText =
-          `🔴 <b>ĐÃ THỎA MÃN ĐỒNG THỜI CẢ 2 TIÊU CHÍ HỢP LƯU TIER 2 (M5):</b>\n` +
+          `🔴 <b>ĐÃ THỎA MÃN ĐỒNG THỜI CẢ 2 TIÊU CHÍ HỢP LƯU TIER 2A (M5):</b>\n` +
           `  1️⃣ <b>Khớp Entry BB + ATR:</b> Giá nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã bung vượt <b>Bands(20) Upper + ATR(14) (${this.formatPrice(state.upperEntry, state.assetType)})</b>\n` +
           `  2️⃣ <b>Chỉ báo RSI Quá Mua:</b> <b>RSI(14) = <code>${state.rsiValue !== undefined ? state.rsiValue.toFixed(2) : '≥ 70'}</code></b> (Đạt ngưỡng <b>≥ 70</b>)`;
         adviceText =
-          '💡 <b>Khuyến nghị chiến lược [TIER 2 - XÁC SUẤT CAO]:</b>\n' +
+          '💡 <b>Khuyến nghị chiến lược [TIER 2A - BB ± ATR + RSI CỰC TRỊ]:</b>\n' +
           '• Hợp lưu kép mạnh mẽ: Biên độ tăng bị kéo giãn kịch trần (Overbought Exhaustion) kết hợp RSI cực đại ≥ 70.\n' +
           '• Tỷ lệ thắng (Winrate) rất cao! Thích hợp mở vị thế <b>SELL / SHORT</b> với quản trị vốn Stop Loss = 1 ATR.';
       } else {
         actionText =
-          `🟢 <b>ĐÃ THỎA MÃN ĐỒNG THỜI CẢ 2 TIÊU CHÍ HỢP LƯU TIER 2 (M5):</b>\n` +
+          `🟢 <b>ĐÃ THỎA MÃN ĐỒNG THỜI CẢ 2 TIÊU CHÍ HỢP LƯU TIER 2A (M5):</b>\n` +
           `  1️⃣ <b>Khớp Entry BB - ATR:</b> Giá nến M5 (<code>${this.formatPrice(state.currentPrice, state.assetType)}</code>) đã đâm thủng <b>Bands(20) Lower - ATR(14) (${this.formatPrice(state.lowerEntry, state.assetType)})</b>\n` +
           `  2️⃣ <b>Chỉ báo RSI Quá Bán:</b> <b>RSI(14) = <code>${state.rsiValue !== undefined ? state.rsiValue.toFixed(2) : '≤ 30'}</code></b> (Đạt ngưỡng <b>≤ 30</b>)`;
         adviceText =
-          '💡 <b>Khuyến nghị chiến lược [TIER 2 - XÁC SUẤT CAO]:</b>\n' +
+          '💡 <b>Khuyến nghị chiến lược [TIER 2A - BB ± ATR + RSI CỰC TRỊ]:</b>\n' +
           '• Hợp lưu kép mạnh mẽ: Biên độ giảm bị nén cực độ (Oversold Exhaustion) kết hợp RSI chạm đáy ≤ 30.\n' +
           '• Tỷ lệ thắng (Winrate) rất cao! Thích hợp giải ngân lệnh <b>BUY / LONG</b> với quản trị vốn Stop Loss = 1 ATR.';
       }
@@ -2107,9 +2192,6 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
     let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    if (sweepBlock) {
-      msg += `${sweepBlock}`;
-    }
     if (state.consecutiveTouches && state.consecutiveTouches > 1) {
       msg += `⚠️ <b>CẢNH BÁO NẾN LIÊN TIẾP:</b> Nến M5 thứ <b>${state.consecutiveTouches}</b> liên tiếp tiếp tục chạm/thủng dải ${isSell ? 'trên' : 'dưới'}!\n\n`;
     }
@@ -2120,13 +2202,14 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     msg += `⚡ <b>Hiện tượng khớp điều kiện:</b>\n`;
     msg += `${actionText}\n\n`;
 
-    const effectiveSlPrice = isTier3 && sweep?.suggestedSL ? sweep.suggestedSL : slPrice;
-    const effectiveSlDesc = isTier3 && sweep?.suggestedSL ? '<b>(⭐ Sau râu quét + 0.2 ATR)</b>' : '<b>(= 1 ATR)</b>';
+    const entryLabel = isTier2B
+      ? `${isSell ? 'SELL' : 'BUY'} Entry (Biên BB ${isSell ? 'Upper' : 'Lower'})`
+      : `${isSell ? 'SELL' : 'BUY'} Entry`;
 
     msg += `🎯 <b>KẾ HOẠCH VÀO LỆNH & CẮT LỖ (QUẢN TRỊ RỦI RO):</b>\n`;
-    msg += `• 🎯 <b>Điểm vào lệnh (${isSell ? 'SELL' : 'BUY'} Entry):</b> <code>${this.formatPrice(entryPrice, state.assetType)}</code>\n`;
-    msg += `• 🛑 <b>Điểm Cắt Lỗ (Stop Loss):</b> <code>${this.formatPrice(effectiveSlPrice, state.assetType)}</code> ${effectiveSlDesc}\n`;
-    msg += `   ↳ <i>Biên độ SL: ${this.formatPrice(Math.abs(entryPrice - effectiveSlPrice), state.assetType)}</i>\n`;
+    msg += `• 🎯 <b>Điểm vào lệnh (${entryLabel}):</b> <code>${this.formatPrice(entryPrice, state.assetType)}</code>\n`;
+    msg += `• 🛑 <b>Điểm Cắt Lỗ (Stop Loss):</b> <code>${this.formatPrice(slPrice, state.assetType)}</code> <b>(= 1 ATR)</b>\n`;
+    msg += `   ↳ <i>Biên độ SL: ${this.formatPrice(Math.abs(entryPrice - slPrice), state.assetType)}</i>\n`;
     msg += `• 🎯 <b>Mục tiêu TP1 (BB Middle):</b> <code>${this.formatPrice(tp1Price, state.assetType)}</code>\n`;
     msg += `• 🎯 <b>Mục tiêu TP2 (Tỷ lệ 1:2 R:R):</b> <code>${this.formatPrice(tp2Price, state.assetType)}</code>\n\n`;
 

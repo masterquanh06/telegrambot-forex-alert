@@ -1,4 +1,5 @@
 import { SweepSignal } from '../services/liquiditySweep';
+import type { SmcMtfTierReason } from './smc-mtf-classifier';
 
 export type SmcTimeframe = 'M1' | 'M5' | 'M15' | 'M30' | 'H1' | 'H4' | 'D1';
 
@@ -55,7 +56,25 @@ export interface SmcAnalysisResult {
   signal: SmcSignalType;
   signalReason: string;
   sweepSignal?: SweepSignal;
-  alertTier?: 1 | 2;
+  alertTier?: 1 | 2 | 3;
+  updatedAt: Date;
+}
+
+export interface SmcMtfAlertPayload {
+  symbol: string;
+  displaySymbol: string;
+  currentPrice: number;
+  nweH1: NweEnvelope;
+  matchedOrderBlocks: OrderBlock[];
+  primaryOb: OrderBlock;
+  confluenceLevel: number;
+  atrM15: number;
+  signal: 'CONFLUENCE_SELL' | 'CONFLUENCE_BUY';
+  direction: 'SELL' | 'BUY';
+  alertTier: 2 | 3;
+  tierReason: SmcMtfTierReason;
+  signalReason: string;
+  rejectionCandleTime?: number;
   updatedAt: Date;
 }
 

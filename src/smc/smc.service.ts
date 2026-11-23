@@ -9,10 +9,16 @@ import {
   KeyLevel,
   SmcSignalType,
   SmcAnalysisResult,
+  SmcMtfAlertPayload,
   UserSmcSettings,
 } from './smc.interface';
 import { CandleData } from '../indicator/bb-atr.interface';
-import { LiquiditySweepService, SweepSignal } from '../services/liquiditySweep';
+import { M15_DURATION_MS, normalizeCandleTimeMs } from '../indicator/signal-classifier';
+import {
+  calculateWilderAtr,
+  classifySmcMtfTier,
+  SMC_MTF_OB_TIMEFRAMES,
+} from './smc-mtf-classifier';
 
 @Injectable()
 export class SmcService {
@@ -31,9 +37,20 @@ export class SmcService {
       lastSignal: SmcSignalType;
       lastAlertTime: number;
       lastPrice: number;
-      lastTier?: 1 | 2;
+      lastTier?: 1 | 2 | 3;
     }
   >();
+
+  // Mutex chống Race Condition cho vòng quét SMC/NWE
+  private isCheckingSmc = false;
+
+  // State quản lý Hợp lưu Chéo Khung (MTF: NWE H1 + OB M15/M30/H1/H4 -> Tier 2 & Tier 3 Rút râu M15)
+  private lastMtfSignal: 'NORMAL' | 'CONFLUENCE_SELL' | 'CONFLUENCE_BUY' = 'NORMAL';
+  private lastMtfTier: 0 | 2 | 3 = 0;
+  private lastMtfAlertTime = 0;
+  private lastMtfAlertCandleTime = 0;
+  private lastMtfWickCandleTime = 0;
+  private lastMtfWickTier = 0;
 
   // In-memory fallback cho cấu hình người dùng phòng khi DB gián đoạn
   private readonly userSettingsFallback = new Map<string, UserSmcSettings>();
@@ -65,7 +82,6 @@ export class SmcService {
     private readonly prisma: PrismaService,
     @Inject(forwardRef(() => TelegramService))
     private readonly telegramService: TelegramService,
-    private readonly liquiditySweepService: LiquiditySweepService,
   ) {}
 
   registerActiveChat(chatId: string) {
@@ -388,31 +404,9 @@ export class SmcService {
       signalReason = `🟢 Giá chạm/thủng dải dưới Nadaraya-Watson Envelope ($${nwe.lowerBand}) [Hỗ trợ động: $${nwe.dynamicSupport}].`;
     }
 
-    // KIỂM TRA QUÉT THANH KHOẢN (LIQUIDITY SWEEP) CHO TÍN HIỆU SMC / NWE
-    let sweepSignal: SweepSignal = { hasSweep: false };
-    let alertTier: 1 | 2 = 1;
-
-    if (signal !== 'NORMAL') {
-      const isSellSide =
-        signal === 'CONFLUENCE_SELL' ||
-        signal === 'TOUCH_SUPPLY_OB' ||
-        signal === 'TOUCH_NWE_UPPER';
-      const expectedDirection = isSellSide ? 'SELL' : 'BUY';
-
-      try {
-        const m15Candles = timeframe === 'M15' ? candles : await this.fetchCandles('M15', 100);
-        sweepSignal = this.liquiditySweepService.checkRecentSweep(
-          candles,
-          m15Candles,
-          expectedDirection,
-        );
-        if (sweepSignal.hasSweep) {
-          alertTier = 2;
-        }
-      } catch (e: any) {
-        this.logger.debug(`Lỗi kiểm tra liquidity sweep trong SMC: ${e.message}`);
-      }
-    }
+    // Phân tích đơn khung luôn là Tier 1; Tier 2 (MTF NWE H1 + OB đa khung) & Tier 3 (+ Rút râu M15)
+    // được xử lý riêng trong luồng Hợp lưu Chéo Khung (checkMtfNweH1ObAlert).
+    const alertTier: 1 | 2 | 3 = 1;
 
     const result: SmcAnalysisResult = {
       symbol: 'XAU',
@@ -427,7 +421,6 @@ export class SmcService {
       touchingSupply,
       signal,
       signalReason,
-      sweepSignal,
       alertTier,
       updatedAt: new Date(),
     };
@@ -782,83 +775,333 @@ export class SmcService {
   }
 
   /**
-   * VÒNG LẶP QUÉT TỰ ĐỘNG KIỂM TRA CẢNH BÁO NWE & SMC TRÊN TẤT CẢ CÁC KHUNG THỜI GIAN
+   * Gửi tin nhắn Telegram song song theo batch (25 users/lượt) dùng Promise.allSettled()
+   * để giảm độ trễ và log rõ chatId lỗi.
    */
-  async checkAllSmcAlerts(): Promise<number> {
-    let triggeredCount = 0;
-    const now = Date.now();
+  private async broadcastTelegramInBatches(
+    chatIds: string[],
+    message: string,
+    extra?: any,
+    batchSize = 25,
+  ): Promise<number> {
+    let sentCount = 0;
 
-    for (const tf of this.supportedTimeframes) {
-      try {
-        const analysis = await this.analyzeTimeframe(tf);
-        if (analysis.signal === 'NORMAL') {
-          // Reset state nếu giá đã rời khỏi vùng
-          if (this.tfAlertStateMap.has(tf)) {
-            const st = this.tfAlertStateMap.get(tf)!;
-            if (st.lastSignal !== 'NORMAL' && now - st.lastAlertTime > 180 * 1000) {
-              st.lastSignal = 'NORMAL';
-              st.lastTier = 1;
-            }
-          }
-          continue;
+    for (let i = 0; i < chatIds.length; i += batchSize) {
+      const batch = chatIds.slice(i, i + batchSize);
+      const results = await Promise.allSettled(
+        batch.map((chatId) => this.telegramService.sendMessage(chatId, message, extra)),
+      );
+
+      results.forEach((res, idx) => {
+        if (res.status === 'fulfilled') {
+          sentCount++;
+        } else {
+          const failedChatId = batch[idx];
+          const reasonMsg = res.reason?.message || String(res.reason);
+          this.logger.warn(`Lỗi gửi SMC/NWE alert tới chatId=${failedChatId}: ${reasonMsg}`);
+        }
+      });
+    }
+
+    return sentCount;
+  }
+
+  /**
+   * VÒNG QUÉT HỢP LƯU CHÉO KHUNG (MTF):
+   * - Tier 2 (MTF Confluence): Chạm biên NWE H1 + giao cắt >= 1 OB từ M15, M30, H1, H4
+   * - Tier 3 (VIP): Thỏa Tier 2 + xuất hiện nến rút râu từ chối khung M15 (detectZoneRejectionWick + atrM15)
+   */
+  async checkMtfNweH1ObAlert(): Promise<{ mtfActive: boolean; triggered: boolean }> {
+    try {
+      const now = Date.now();
+      const [m15Candles, m30Candles, h1Candles, h4Candles] = await Promise.all([
+        this.fetchCandles('M15', 100),
+        this.fetchCandles('M30', 100),
+        this.fetchCandles('H1', 100),
+        this.fetchCandles('H4', 100),
+      ]);
+
+      if (!m15Candles.length || !h1Candles.length) {
+        return { mtfActive: false, triggered: false };
+      }
+
+      const nweH1 = this.calculateNwe(h1Candles, 8, 3.0);
+      const atrM15 = calculateWilderAtr(m15Candles, 14);
+
+      const obM15 = this.detectOrderBlocks(m15Candles, 'M15');
+      const obM30 = this.detectOrderBlocks(m30Candles, 'M30');
+      const obH1 = this.detectOrderBlocks(h1Candles, 'H1');
+      const obH4 = this.detectOrderBlocks(h4Candles, 'H4');
+
+      const obPools: OrderBlock[] = [
+        ...obM15.activeSupply,
+        ...obM15.activeDemand,
+        ...obM30.activeSupply,
+        ...obM30.activeDemand,
+        ...obH1.activeSupply,
+        ...obH1.activeDemand,
+        ...obH4.activeSupply,
+        ...obH4.activeDemand,
+      ];
+
+      const m15Candle = m15Candles[m15Candles.length - 1];
+      const m15PrevCandle = m15Candles.length >= 2 ? m15Candles[m15Candles.length - 2] : undefined;
+      const candleTime = normalizeCandleTimeMs(m15Candle.time);
+
+      let result = classifySmcMtfTier({
+        currentPrice: m15Candle.close,
+        candleHigh: m15Candle.high,
+        candleLow: m15Candle.low,
+        nweH1,
+        obPools,
+        atrM15,
+        m15Candle,
+        m15PrevCandle,
+        nowMs: now,
+        candleDurationMs: M15_DURATION_MS,
+      });
+
+      // Chống bắn trùng cho tín hiệu nến rút râu M15 (Tier 3)
+      if (
+        result.tierReason === 'SMC_TIER_3_MTF_WICK' &&
+        result.rejectionCandleTime !== undefined &&
+        result.rejectionCandleTime <= this.lastMtfWickCandleTime &&
+        result.alertTier <= this.lastMtfWickTier
+      ) {
+        if (result.rejectionCandleTime < candleTime) {
+          // Tier 3 đến từ m15PrevCandle đã báo rồi -> đánh giá lại nến M15 hiện tại không dùng prevCandle
+          result = classifySmcMtfTier({
+            currentPrice: m15Candle.close,
+            candleHigh: m15Candle.high,
+            candleLow: m15Candle.low,
+            nweH1,
+            obPools,
+            atrM15,
+            nowMs: now,
+            candleDurationMs: M15_DURATION_MS,
+          });
+        } else {
+          return { mtfActive: true, triggered: false };
+        }
+      }
+
+      if (result.signal === 'NORMAL' || !result.primaryOb || !result.direction) {
+        if (this.lastMtfSignal !== 'NORMAL' && now - this.lastMtfAlertTime > 180 * 1000) {
+          this.lastMtfSignal = 'NORMAL';
+          this.lastMtfTier = 0;
+        }
+        return { mtfActive: false, triggered: false };
+      }
+
+      const isNewCandle = candleTime > this.lastMtfAlertCandleTime;
+      const isUpgradeTier = result.alertTier > this.lastMtfTier;
+      const isNewSignal = result.signal !== this.lastMtfSignal;
+      const isNewWickConfirmation =
+        result.tierReason === 'SMC_TIER_3_MTF_WICK' &&
+        result.rejectionCandleTime !== undefined &&
+        result.rejectionCandleTime > this.lastMtfWickCandleTime;
+      const isCooldownPassed = now - this.lastMtfAlertTime > 150 * 1000;
+
+      if (isUpgradeTier || isNewWickConfirmation || isNewCandle || isNewSignal || isCooldownPassed) {
+        this.lastMtfSignal = result.signal;
+        this.lastMtfTier = result.alertTier as 2 | 3;
+        this.lastMtfAlertTime = now;
+        this.lastMtfAlertCandleTime = candleTime;
+
+        if (result.tierReason === 'SMC_TIER_3_MTF_WICK' && result.rejectionCandleTime !== undefined) {
+          this.lastMtfWickCandleTime = result.rejectionCandleTime;
+          this.lastMtfWickTier = result.alertTier;
         }
 
-        const stateKey = tf;
-        const state = this.tfAlertStateMap.get(stateKey) || {
-          lastSignal: 'NORMAL',
-          lastAlertTime: 0,
-          lastPrice: 0,
-          lastTier: 1 as 1 | 2,
+        const payload: SmcMtfAlertPayload = {
+          symbol: 'XAU',
+          displaySymbol: 'XAU/USD (Vàng Forex)',
+          currentPrice: Number(m15Candle.close.toFixed(2)),
+          nweH1,
+          matchedOrderBlocks: result.matchedOrderBlocks,
+          primaryOb: result.primaryOb,
+          confluenceLevel: result.confluenceLevel ?? nweH1.upperBand,
+          atrM15: Number(atrM15.toFixed(2)),
+          signal: result.signal,
+          direction: result.direction,
+          alertTier: result.alertTier as 2 | 3,
+          tierReason: result.tierReason,
+          signalReason: result.signalReason,
+          rejectionCandleTime: result.rejectionCandleTime,
+          updatedAt: new Date(),
         };
 
-        const isUpgradeToTier2 = state.lastTier !== 2 && analysis.alertTier === 2;
-        const isNewSignal = state.lastSignal !== analysis.signal;
-        const isCooldownPassed = now - state.lastAlertTime > 150 * 1000; // Cooldown 2.5 phút
+        const subscribers = await this.getAllSubscribers();
+        const isTier3 = payload.alertTier === 3;
+        const matchedObTfs = new Set(payload.matchedOrderBlocks.map((ob) => ob.timeframe));
 
-        if (isUpgradeToTier2 || isNewSignal || isCooldownPassed) {
-          state.lastSignal = analysis.signal;
-          state.lastAlertTime = now;
-          state.lastPrice = analysis.currentPrice;
-          state.lastTier = analysis.alertTier;
-          this.tfAlertStateMap.set(stateKey, state);
-
-          // Phát cảnh báo tới người dùng
-          const subscribers = await this.getAllSubscribers();
-          const isNweSignal =
-            analysis.signal === 'TOUCH_NWE_UPPER' ||
-            analysis.signal === 'TOUCH_NWE_LOWER' ||
-            analysis.signal === 'CONFLUENCE_BUY' ||
-            analysis.signal === 'CONFLUENCE_SELL';
-
-          const isObSignal =
-            analysis.signal === 'TOUCH_DEMAND_OB' ||
-            analysis.signal === 'TOUCH_SUPPLY_OB' ||
-            analysis.signal === 'CONFLUENCE_BUY' ||
-            analysis.signal === 'CONFLUENCE_SELL';
-
-          const alertMsg = this.renderAlertMessage(analysis);
-
-          let sentCount = 0;
-          for (const sub of subscribers) {
-            const isTier2 = analysis.alertTier === 2;
-
-            if (isTier2) {
-              // TIER 2 (HIGH PROBABILITY - CÓ QUÉT THANH KHOẢN):
-              // Người dùng có cài đặt Bật/Tắt RIÊNG cho Tier 2:
-              const isTier2On = sub.settings.tier2AlertEnabled !== false;
-              if (!isTier2On) {
-                // Người dùng đã chủ động TẮT riêng cảnh báo Tier 2 -> Bỏ qua
-                continue;
-              }
-              // Người dùng BẬT Tier 2 -> Báo ngay lập tức (kể cả NWE, OB hay khung thời gian bị tắt)
-            } else {
-              const nweActive = sub.settings.nweAlertEnabled && (sub.settings.nweTimeframes || sub.settings.timeframes).includes(tf);
-              const obActive = sub.settings.smcAlertEnabled && (sub.settings.smcTimeframes || sub.settings.timeframes).includes(tf);
-
-              const matchNwe = isNweSignal && nweActive;
-              const matchOb = isObSignal && obActive;
-              if (!matchNwe && !matchOb) continue;
+        const eligibleChatIds = subscribers
+          .filter((sub) => {
+            if (isTier3) {
+              // TIER 3 (VIP): gửi cho mọi user không chủ động tắt Tier VIP
+              return sub.settings.tier2AlertEnabled !== false;
             }
+            // TIER 2 (MTF Confluence): gửi cho user đang bật NWE H1 hoặc OB thuộc các khung bị chạm
+            const nweTfs = sub.settings.nweTimeframes || sub.settings.timeframes;
+            const obTfs = sub.settings.smcTimeframes || sub.settings.timeframes;
+            const matchNweH1 = sub.settings.nweAlertEnabled && nweTfs.includes('H1');
+            const matchAnyOb =
+              sub.settings.smcAlertEnabled &&
+              obTfs.some((tf) => matchedObTfs.has(tf) && SMC_MTF_OB_TIMEFRAMES.includes(tf));
+            return matchNweH1 || matchAnyOb;
+          })
+          .map((sub) => sub.chatId);
+
+        if (eligibleChatIds.length === 0) {
+          return { mtfActive: true, triggered: false };
+        }
+
+        const alertMsg = this.renderMtfAlertMessage(payload);
+        const sentCount = await this.broadcastTelegramInBatches(
+          eligibleChatIds,
+          alertMsg,
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [
+                  { text: '🌊 Xem NWE H1', callback_data: 'nwe_view:H1' },
+                  { text: `🧱 Xem OB ${payload.primaryOb.timeframe}`, callback_data: `ob_view:${payload.primaryOb.timeframe}` },
+                ],
+              ],
+            },
+          },
+          25,
+        );
+
+        if (sentCount > 0) {
+          const tierLabel = isTier3 ? 'TIER 3 (MTF + RÚT RÂU M15 🔥🔥🔥)' : 'TIER 2 (MTF NWE H1 + OB 🔥🔥)';
+          this.logger.log(
+            `🔔 [SMC/NWE ${tierLabel}] ${payload.signal} tại $${payload.currentPrice} (OB: ${Array.from(matchedObTfs).join('+')}) -> Đã gửi ${sentCount} user.`,
+          );
+
+          try {
+            await this.prisma.executeWithRetry(() =>
+              this.prisma.smcAlertLog.create({
+                data: {
+                  symbol: 'XAU',
+                  timeframe: 'MTF_H1',
+                  alertType: payload.signal,
+                  price: payload.currentPrice,
+                  zoneTop: payload.primaryOb.top,
+                  zoneBottom: payload.primaryOb.bottom,
+                  message: payload.signalReason,
+                },
+              }),
+            );
+          } catch (e) {}
+
+          return { mtfActive: true, triggered: true };
+        }
+      }
+
+      return { mtfActive: true, triggered: false };
+    } catch (err: any) {
+      this.logger.debug(`Lỗi quét SMC MTF NWE H1 + OB: ${err.message}`);
+      return { mtfActive: false, triggered: false };
+    }
+  }
+
+  /**
+   * VÒNG LẶP QUÉT TỰ ĐỘNG KIỂM TRA CẢNH BÁO NWE & SMC TRÊN TẤT CẢ CÁC KHUNG THỜI GIAN
+   * Bao gồm cả Hợp lưu Chéo Khung (NWE H1 + OB M15/M30/H1/H4 -> Tier 2 & Tier 3 Rút râu M15)
+   */
+  async checkAllSmcAlerts(): Promise<number> {
+    if (this.isCheckingSmc) {
+      return 0;
+    }
+    this.isCheckingSmc = true;
+
+    try {
+      let triggeredCount = 0;
+      const now = Date.now();
+
+      // 1. Chạy luồng Hợp lưu Chéo Khung (Tier 2 MTF & Tier 3 VIP Rút râu M15) trước
+      const mtfStatus = await this.checkMtfNweH1ObAlert();
+      if (mtfStatus.triggered) {
+        triggeredCount++;
+      }
+
+      // 2. Quét từng khung đơn lẻ (Tier 1)
+      for (const tf of this.supportedTimeframes) {
+        try {
+          const analysis = await this.analyzeTimeframe(tf);
+          if (analysis.signal === 'NORMAL') {
+            // Reset state nếu giá đã rời khỏi vùng
+            if (this.tfAlertStateMap.has(tf)) {
+              const st = this.tfAlertStateMap.get(tf)!;
+              if (st.lastSignal !== 'NORMAL' && now - st.lastAlertTime > 180 * 1000) {
+                st.lastSignal = 'NORMAL';
+                st.lastTier = 1;
+              }
+            }
+            continue;
+          }
+
+          // CHỐNG BẮN TRÙNG: H1 đã nằm trong luồng MTF OB (M15, M30, H1, H4).
+          // Khi NWE H1 + OB H1 hợp lưu (CONFLUENCE_SELL / CONFLUENCE_BUY), bỏ qua tin nhắn đơn khung H1 cũ
+          // vì đã được luồng MTF Tier 2 / Tier 3 xử lý trọn vẹn.
+          if (
+            tf === 'H1' &&
+            (analysis.signal === 'CONFLUENCE_SELL' || analysis.signal === 'CONFLUENCE_BUY')
+          ) {
+            continue;
+          }
+
+          const stateKey = tf;
+          const state = this.tfAlertStateMap.get(stateKey) || {
+            lastSignal: 'NORMAL',
+            lastAlertTime: 0,
+            lastPrice: 0,
+            lastTier: 1 as 1 | 2 | 3,
+          };
+
+          const isNewSignal = state.lastSignal !== analysis.signal;
+          const isCooldownPassed = now - state.lastAlertTime > 150 * 1000; // Cooldown 2.5 phút
+
+          if (isNewSignal || isCooldownPassed) {
+            state.lastSignal = analysis.signal;
+            state.lastAlertTime = now;
+            state.lastPrice = analysis.currentPrice;
+            state.lastTier = analysis.alertTier || 1;
+            this.tfAlertStateMap.set(stateKey, state);
+
+            // Phát cảnh báo tới người dùng
+            const subscribers = await this.getAllSubscribers();
+            const isNweSignal =
+              analysis.signal === 'TOUCH_NWE_UPPER' ||
+              analysis.signal === 'TOUCH_NWE_LOWER' ||
+              analysis.signal === 'CONFLUENCE_BUY' ||
+              analysis.signal === 'CONFLUENCE_SELL';
+
+            const isObSignal =
+              analysis.signal === 'TOUCH_DEMAND_OB' ||
+              analysis.signal === 'TOUCH_SUPPLY_OB' ||
+              analysis.signal === 'CONFLUENCE_BUY' ||
+              analysis.signal === 'CONFLUENCE_SELL';
+
+            const alertMsg = this.renderAlertMessage(analysis);
+
+            const eligibleChatIds = subscribers
+              .filter((sub) => {
+                const nweActive =
+                  sub.settings.nweAlertEnabled &&
+                  (sub.settings.nweTimeframes || sub.settings.timeframes).includes(tf);
+                const obActive =
+                  sub.settings.smcAlertEnabled &&
+                  (sub.settings.smcTimeframes || sub.settings.timeframes).includes(tf);
+
+                const matchNwe = isNweSignal && nweActive;
+                const matchOb = isObSignal && obActive;
+                return matchNwe || matchOb;
+              })
+              .map((sub) => sub.chatId);
+
+            if (eligibleChatIds.length === 0) continue;
 
             // Tạo các nút điều hướng theo từng chiến lược riêng biệt
             const alertButtons: any[] = [];
@@ -879,49 +1122,50 @@ export class SmcService {
               ]);
             }
 
-            try {
-              await this.telegramService.sendMessage(sub.chatId, alertMsg, {
+            const sentCount = await this.broadcastTelegramInBatches(
+              eligibleChatIds,
+              alertMsg,
+              {
                 reply_markup: {
                   inline_keyboard: alertButtons,
                 },
-              });
-              sentCount++;
-            } catch (e) {}
-          }
-
-          if (sentCount > 0) {
-            triggeredCount++;
-            if (analysis.alertTier === 2 && analysis.sweepSignal?.pool?.id) {
-              this.liquiditySweepService.markPoolAsSwept(analysis.sweepSignal.pool.id);
-            }
-            this.logger.log(
-              `🔔 [SMC/NWE ALERT ${analysis.alertTier === 2 ? 'TIER 2 (SWEEP)' : 'TIER 1'}] Khung ${tf}: ${analysis.signal} tại $${analysis.currentPrice} -> Đã gửi ${sentCount} user.`,
+              },
+              25,
             );
 
-            // Ghi log vào DB
-            try {
-              await this.prisma.executeWithRetry(() =>
-                this.prisma.smcAlertLog.create({
-                  data: {
-                    symbol: 'XAU',
-                    timeframe: tf,
-                    alertType: analysis.signal,
-                    price: analysis.currentPrice,
-                    zoneTop: analysis.touchingSupply?.top || analysis.touchingDemand?.top,
-                    zoneBottom: analysis.touchingSupply?.bottom || analysis.touchingDemand?.bottom,
-                    message: analysis.signalReason,
-                  },
-                }),
+            if (sentCount > 0) {
+              triggeredCount++;
+              this.logger.log(
+                `🔔 [SMC/NWE ALERT TIER 1] Khung ${tf}: ${analysis.signal} tại $${analysis.currentPrice} -> Đã gửi ${sentCount} user.`,
               );
-            } catch (e) {}
-          }
-        }
-      } catch (err: any) {
-        this.logger.debug(`Lỗi quét SMC khung ${tf}: ${err.message}`);
-      }
-    }
 
-    return triggeredCount;
+              // Ghi log vào DB
+              try {
+                await this.prisma.executeWithRetry(() =>
+                  this.prisma.smcAlertLog.create({
+                    data: {
+                      symbol: 'XAU',
+                      timeframe: tf,
+                      alertType: analysis.signal,
+                      price: analysis.currentPrice,
+                      zoneTop: analysis.touchingSupply?.top || analysis.touchingDemand?.top,
+                      zoneBottom: analysis.touchingSupply?.bottom || analysis.touchingDemand?.bottom,
+                      message: analysis.signalReason,
+                    },
+                  }),
+                );
+              } catch (e) {}
+            }
+          }
+        } catch (err: any) {
+          this.logger.debug(`Lỗi quét SMC khung ${tf}: ${err.message}`);
+        }
+      }
+
+      return triggeredCount;
+    } finally {
+      this.isCheckingSmc = false;
+    }
   }
 
   /**
@@ -971,7 +1215,7 @@ export class SmcService {
     msg += `⚡ <b>Trạng thái:</b> <b>${statusText}</b>\n`;
     msg += `🔔 <b>Cảnh báo tự động NWE:</b> <b>${isNweOn ? '🟢 ĐANG BẬT' : '⚪ ĐÃ TẮT'}</b>\n`;
     msg += `⏳ <b>Khung nhận tin NWE (${nweTfs.length}/6 khung):</b> <code>${nweTfs.join(', ')}</code>\n`;
-    msg += `🔥 <b>Cảnh báo Tier 2 (Quét thanh khoản):</b> <b>${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao)' : '⚪ ĐÃ TẮT'}</b>\n`;
+    msg += `🔥 <b>Cảnh báo Tier 3 VIP (NWE H1 + OB + Rút râu M15):</b> <b>${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao nhất)' : '⚪ ĐÃ TẮT'}</b>\n`;
 
     return msg;
   }
@@ -1033,7 +1277,7 @@ export class SmcService {
     msg += `⚡ <b>Trạng thái:</b> <b>${statusText}</b>\n`;
     msg += `🔔 <b>Cảnh báo tự động Order Block:</b> <b>${isObOn ? '🟢 ĐANG BẬT' : '⚪ ĐÃ TẮT'}</b>\n`;
     msg += `⏳ <b>Khung nhận tin Order Block (${obTfs.length}/6 khung):</b> <code>${obTfs.join(', ')}</code>\n`;
-    msg += `🔥 <b>Cảnh báo Tier 2 (Quét thanh khoản):</b> <b>${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao)' : '⚪ ĐÃ TẮT'}</b>\n`;
+    msg += `🔥 <b>Cảnh báo Tier 3 VIP (NWE H1 + OB + Rút râu M15):</b> <b>${isTier2On ? '🟢 ĐANG BẬT (Ưu tiên cao nhất)' : '⚪ ĐÃ TẮT'}</b>\n`;
 
     return msg;
   }
@@ -1094,17 +1338,109 @@ export class SmcService {
 
     // 3. Trạng thái hiện tại
     msg += `⚡ <b>Trạng thái:</b> <b>${analysis.signalReason}</b>\n`;
-    if (analysis.alertTier === 2 && analysis.sweepSignal?.pool) {
-      const sweep = analysis.sweepSignal;
-      const poolLabel = sweep.type === 'SELL_SWEEP' ? 'Quét Đỉnh (BSL)' : 'Quét Đáy (SSL)';
-      msg += `🔥 <b>Tín hiệu nâng cao:</b> <b>[TIER 2] CÓ QUÉT THANH KHOẢN (${poolLabel}) tại $${sweep.pool.price} (SL: $${sweep.suggestedSL})</b>\n`;
-    }
 
     return msg;
   }
 
   /**
-   * FORMAT TIN NHẮN CẢNH BÁO GỬI TELEGRAM KHI CHẠM NWE HOẶC ORDER BLOCK
+   * FORMAT TIN NHẮN CẢNH BÁO HỢP LƯU CHÉO KHUNG (SMC + NWE TIER 2 & TIER 3 VIP)
+   */
+  renderMtfAlertMessage(payload: SmcMtfAlertPayload): string {
+    const nowStr = new Intl.DateTimeFormat('vi-VN', {
+      timeZone: 'Asia/Ho_Chi_Minh',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    }).format(new Date());
+
+    const isSell = payload.direction === 'SELL';
+    const isTier3 = payload.alertTier === 3;
+    const tfSummary = Array.from(new Set(payload.matchedOrderBlocks.map((ob) => ob.timeframe))).join(' + ');
+
+    const headerEmoji = (isTier3 ? '🔥🔥🔥 ' : '🔥🔥 ') + (isSell ? '🔴🔴' : '🟢🟢');
+    const headerTitle = isTier3
+      ? isSell
+        ? `[TIER 3 - VIP] HỢP LƯU BÁN NWE H1 + SUPPLY OB (${tfSummary}) + NẾN RÚT RÂU M15!`
+        : `[TIER 3 - VIP] HỢP LƯU MUA NWE H1 + DEMAND OB (${tfSummary}) + NẾN RÚT RÂU M15!`
+      : isSell
+      ? `[TIER 2 - MTF] HỢP LƯU BÁN CHÉO KHUNG: NWE H1 + SUPPLY OB (${tfSummary})!`
+      : `[TIER 2 - MTF] HỢP LƯU MUA CHÉO KHUNG: NWE H1 + DEMAND OB (${tfSummary})!`;
+
+    const primaryOb = payload.primaryOb;
+    const slBuffer = Number((0.5 * payload.atrM15).toFixed(2));
+    const suggestedSl = isSell
+      ? Number((primaryOb.top + slBuffer).toFixed(2))
+      : Number((primaryOb.bottom - slBuffer).toFixed(2));
+    const tp1 = payload.nweH1.kernel;
+
+    let obLines = '';
+    payload.matchedOrderBlocks.forEach((ob) => {
+      const icon = ob.type === 'SUPPLY' ? '🔴' : '🟢';
+      const primaryTag = ob.id === primaryOb.id ? ' ⭐ <i>[Khối chính]</i>' : '';
+      obLines += `  • ${icon} <b>${ob.label}:</b> <code>$${ob.bottom.toFixed(2)} - $${ob.top.toFixed(2)}</code>${primaryTag}\n`;
+    });
+
+    let conditionBlock = '';
+    if (isTier3) {
+      conditionBlock = isSell
+        ? `🔴 <b>ĐÃ XÁC NHẬN ĐỦ 3 LỚP HỢP LƯU TIER 3 (VIP):</b>\n` +
+          `  1️⃣ <b>Dải trên NWE H1:</b> Chạm/vượt mốc <code>$${payload.nweH1.upperBand.toFixed(2)}</code> (Quá Mua H1)\n` +
+          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Giá tiến vào vùng Supply OB chính <code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>\n` +
+          `  3️⃣ <b>Nến rút râu từ chối M15:</b> Rút râu trên mạnh trong vùng hợp lưu (không phá vỡ mép trên OB <code>$${primaryOb.top.toFixed(2)}</code>, lọc chuẩn theo ATR M15 = <code>${payload.atrM15.toFixed(2)}</code>)`
+        : `🟢 <b>ĐÃ XÁC NHẬN ĐỦ 3 LỚP HỢP LƯU TIER 3 (VIP):</b>\n` +
+          `  1️⃣ <b>Dải dưới NWE H1:</b> Chạm/thủng mốc <code>$${payload.nweH1.lowerBand.toFixed(2)}</code> (Quá Bán H1)\n` +
+          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Giá rơi vào vùng Demand OB chính <code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>\n` +
+          `  3️⃣ <b>Nến rút râu từ chối M15:</b> Rút chân dưới mạnh trong vùng hợp lưu (không phá vỡ mép dưới OB <code>$${primaryOb.bottom.toFixed(2)}</code>, lọc chuẩn theo ATR M15 = <code>${payload.atrM15.toFixed(2)}</code>)`;
+    } else {
+      conditionBlock = isSell
+        ? `🔴 <b>KHỚP HỢP LƯU CHÉO KHUNG TIER 2 (MTF):</b>\n` +
+          `  1️⃣ <b>Dải trên NWE H1:</b> Giá chạm/vượt biên trên NWE khung H1 (<code>$${payload.nweH1.upperBand.toFixed(2)}</code>)\n` +
+          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Đồng thời giao cắt vùng Supply OB chưa triệt tiêu (<code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>)`
+        : `🟢 <b>KHỚP HỢP LƯU CHÉO KHUNG TIER 2 (MTF):</b>\n` +
+          `  1️⃣ <b>Dải dưới NWE H1:</b> Giá chạm/thủng biên dưới NWE khung H1 (<code>$${payload.nweH1.lowerBand.toFixed(2)}</code>)\n` +
+          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Đồng thời giao cắt vùng Demand OB chưa triệt tiêu (<code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>)`;
+    }
+
+    const adviceText = isTier3
+      ? '💡 <b>Khuyến nghị chiến lược [TIER 3 - VIP SMC + NWE]:</b>\n' +
+        `• Hợp lưu đa khung NWE H1 + OB (${tfSummary}) ĐỒNG THỜI đã có nến M15 rút râu xác nhận từ chối giá quyết liệt.\n` +
+        `• Ưu tiên mở vị thế <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> với Stop Loss đặt ngoài mép khối OB chính (<code>$${suggestedSl.toFixed(2)}</code>).`
+      : '💡 <b>Khuyến nghị chiến lược [TIER 2 - HỢP LƯU ĐA KHUNG]:</b>\n' +
+        `• Giá đang hội tụ tại 2 lớp cản mạnh (NWE H1 + OB ${tfSummary}).\n` +
+        `• Thích hợp canh mở vị thế <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> hoặc chờ nến M15 rút râu xác nhận nâng cấp lên <b>TIER 3 VIP</b>!`;
+
+    let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `💎 <b>Tài sản:</b> <code>${payload.displaySymbol}</code>\n`;
+    msg += `⏳ <b>Hợp lưu khung:</b> <b>NWE H1 + OB (${tfSummary})</b>${isTier3 ? ' + <b>Nến M15</b>' : ''}\n`;
+    msg += `💵 <b>Giá thị trường hiện tại:</b> <code>$${payload.currentPrice.toFixed(2)}</code>\n\n`;
+
+    msg += `⚡ <b>Hiện tượng khớp điều kiện:</b>\n`;
+    msg += `${conditionBlock}\n\n`;
+
+    msg += `📦 <b>CÁC KHỐI ORDER BLOCK ĐANG GIAO CẮT (${payload.matchedOrderBlocks.length}):</b>\n`;
+    msg += `${obLines}\n`;
+
+    msg += `🎯 <b>KẾ HOẠCH THAM KHẢO (VÙNG HỢP LƯU):</b>\n`;
+    msg += `• 🎯 <b>Mép vùng hợp lưu (${isSell ? 'SELL' : 'BUY'}):</b> <code>$${payload.confluenceLevel.toFixed(2)}</code>\n`;
+    msg += `• 🛑 <b>Gợi ý Cắt Lỗ (SL ngoài OB + 0.5 ATR M15):</b> <code>$${suggestedSl.toFixed(2)}</code>\n`;
+    msg += `• 🎯 <b>Mục tiêu TP1 (NWE H1 Kernel):</b> <code>$${tp1.toFixed(2)}</code>\n\n`;
+
+    msg += `📊 <b>THÔNG SỐ KỸ THUẬT:</b>\n`;
+    msg += `• NWE H1 Upper: <code>$${payload.nweH1.upperBand.toFixed(2)}</code> | Kernel: <code>$${payload.nweH1.kernel.toFixed(2)}</code> | Lower: <code>$${payload.nweH1.lowerBand.toFixed(2)}</code>\n`;
+    msg += `• ATR(14) M15: <code>${payload.atrM15.toFixed(2)}</code>\n`;
+    msg += `⏱ <b>Thời gian phát hiện:</b> <code>${nowStr}</code>\n\n`;
+
+    msg += `${adviceText}`;
+
+    return msg;
+  }
+
+  /**
+   * FORMAT TIN NHẮN CẢNH BÁO GỬI TELEGRAM KHI CHẠM NWE HOẶC ORDER BLOCK (TIER 1 ĐƠN KHUNG)
    */
   renderAlertMessage(analysis: SmcAnalysisResult): string {
     const nowStr = new Intl.DateTimeFormat('vi-VN', {
@@ -1117,101 +1453,52 @@ export class SmcService {
       year: 'numeric',
     }).format(new Date());
 
-    const isSell =
-      analysis.signal === 'CONFLUENCE_SELL' ||
-      analysis.signal === 'TOUCH_SUPPLY_OB' ||
-      analysis.signal === 'TOUCH_NWE_UPPER';
-    const isTier2 =
-      analysis.alertTier === 2 && analysis.sweepSignal?.hasSweep && !!analysis.sweepSignal.pool;
-    const sweep = analysis.sweepSignal;
-
     let headerEmoji = '🔔';
     let headerTitle = 'CẢNH BÁO KỸ THUẬT: KHỚP VÙNG QUAN TRỌNG!';
     let adviceText = '';
 
-    let sweepBlock = '';
-    if (isTier2 && sweep?.pool) {
-      headerEmoji = '🔥🔥 ' + (isSell ? '🔴🔴' : '🟢🟢');
-      headerTitle = '[TIER 2 - HIGH PROBABILITY] QUÉT THANH KHOẢN + NADARAYA-WATSON & SMC ORDER BLOCKS';
-
-      const poolTypeLabel =
-        sweep.type === 'SELL_SWEEP'
-          ? 'Quét Đỉnh (BSL Sweep -> Canh SELL)'
-          : 'Quét Đáy (SSL Sweep -> Canh BUY)';
-      const majorTag = sweep.pool.isMajorPool ? ' ⭐ [EQH/EQL Bể lớn]' : '';
-      const wickPct = ((sweep.wickRatio || 0) * 100).toFixed(1);
-
-      sweepBlock += `🌊 <b>TÍN HIỆU QUÉT THANH KHOẢN THẬT (TRUE LIQUIDITY SWEEP):</b>\n`;
-      sweepBlock += `• 🎯 <b>Loại quét:</b> <b>${poolTypeLabel}</b>\n`;
-      sweepBlock += `• 📍 <b>Mốc bị quét:</b> <code>$${sweep.pool.price.toFixed(2)}</code> <i>(hình thành lúc ${sweep.pool.timeStr} khung M15)</i>${majorTag}\n`;
-      sweepBlock += `• 📏 <b>Độ sâu quét:</b> <code>$${sweep.sweepDepth?.toFixed(2)}</code> (${sweep.sweepDepthAtrRatio} ATR) - Râu nến rút: <b>${wickPct}%</b>\n`;
-      sweepBlock += `• 🛑 <b>Gợi ý SL tối ưu sau râu quét:</b> <code>$${sweep.suggestedSL?.toFixed(2)}</code>\n\n`;
-    }
-
     if (analysis.signal === 'CONFLUENCE_SELL') {
-      if (!isTier2) {
-        headerEmoji = '🚨🔴🔴';
-        headerTitle = 'HỢP LƯU BÁN CỰC MẠNH: DẢI TRÊN NWE + VÙNG CUNG (SUPPLY OB)!';
-      }
+      headerEmoji = '🚨🔴🔴';
+      headerTitle = 'HỢP LƯU BÁN CỰC MẠNH: DẢI TRÊN NWE + VÙNG CUNG (SUPPLY OB)!';
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá chạm đồng thời 2 lớp cản: Biên trên Nadaraya-Watson Envelope và khối Bearish Order Block.\n' +
         '• Áp lực bán chặn chiều tăng cực lớn. Thích hợp mở vị thế <b>SELL / SHORT</b> hoặc chốt lời vị thế BUY!';
     } else if (analysis.signal === 'CONFLUENCE_BUY') {
-      if (!isTier2) {
-        headerEmoji = '🚨🟢🟢';
-        headerTitle = 'HỢP LƯU MUA CỰC MẠNH: DẢI DƯỚI NWE + VÙNG CẦU (DEMAND OB)!';
-      }
+      headerEmoji = '🚨🟢🟢';
+      headerTitle = 'HỢP LƯU MUA CỰC MẠNH: DẢI DƯỚI NWE + VÙNG CẦU (DEMAND OB)!';
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá chạm đồng thời 2 lớp đỡ: Biên dưới Nadaraya-Watson Envelope và khối Bullish Order Block.\n' +
         '• Lực cầu bắt đáy nhập cuộc mạnh. Thích hợp mở vị thế <b>BUY / LONG</b> bắt sóng hồi phục!';
     } else if (analysis.signal === 'TOUCH_SUPPLY_OB') {
-      if (!isTier2) {
-        headerEmoji = '🧱🔴';
-        headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CUNG (SUPPLY ZONE / BEARISH ORDER BLOCK)!';
-      }
+      headerEmoji = '🧱🔴';
+      headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CUNG (SUPPLY ZONE / BEARISH ORDER BLOCK)!';
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá đã tiến vào vùng tồn đọng lệnh bán của cá mập (Bearish OB). Canh phản ứng từ chối giá (rút râu nến) để vào lệnh <b>SELL</b>.';
     } else if (analysis.signal === 'TOUCH_DEMAND_OB') {
-      if (!isTier2) {
-        headerEmoji = '🧱🟢';
-        headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CẦU (DEMAND ZONE / BULLISH ORDER BLOCK)!';
-      }
+      headerEmoji = '🧱🟢';
+      headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CẦU (DEMAND ZONE / BULLISH ORDER BLOCK)!';
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Giá đã rơi vào vùng thanh khoản mua của tổ chức (Bullish OB). Canh phản ứng đảo chiều rút chân để vào lệnh <b>BUY</b>.';
     } else if (analysis.signal === 'TOUCH_NWE_UPPER') {
-      if (!isTier2) {
-        headerEmoji = '🌊🔴';
-        headerTitle = 'GIÁ CHẠM DẢI TRÊN NADARAYA-WATSON ENVELOPE (QUÁ MUA)!';
-      }
+      headerEmoji = '🌊🔴';
+      headerTitle = 'GIÁ CHẠM DẢI TRÊN NADARAYA-WATSON ENVELOPE (QUÁ MUA)!';
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Biên độ giá bung vượt khỏi dải biên trên NWE (Quá Mua kỹ thuật). Xác suất điều chỉnh ngắn hạn rất cao.';
     } else if (analysis.signal === 'TOUCH_NWE_LOWER') {
-      if (!isTier2) {
-        headerEmoji = '🌊🟢';
-        headerTitle = 'GIÁ CHẠM DẢI DƯỚI NADARAYA-WATSON ENVELOPE (QUÁ BÁN)!';
-      }
+      headerEmoji = '🌊🟢';
+      headerTitle = 'GIÁ CHẠM DẢI DƯỚI NADARAYA-WATSON ENVELOPE (QUÁ BÁN)!';
       adviceText =
         '💡 <b>Khuyến nghị chiến lược:</b>\n' +
         '• Biên độ giá xuyên thủng dải biên dưới NWE (Quá Bán kỹ thuật). Thích hợp quan sát nhịp hồi phục kỹ thuật.';
     }
 
-    if (isTier2) {
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược [TIER 2 - SUPER CONFLUENCE]:</b>\n' +
-        '• Đỉnh cao hợp lưu: Giá chạm vùng quan trọng (NWE / Order Block) ĐỒNG THỜI vừa quét sạch bể thanh khoản (Liquidity Sweep) và rút râu đảo chiều mạnh!\n' +
-        `• Tỷ lệ thắng (Winrate) cực cao. Thích hợp mở vị thế <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> với SL ngay sau râu nến quét!`;
-    }
-
     let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    if (sweepBlock) {
-      msg += `${sweepBlock}`;
-    }
     msg += `💎 <b>Tài sản:</b> <code>${analysis.displaySymbol}</code>\n`;
     msg += `⏳ <b>Khung thời gian:</b> <b>${this.timeframeLabels[analysis.timeframe] || analysis.timeframe}</b>\n`;
     msg += `💵 <b>Giá thị trường hiện tại:</b> <code>$${analysis.currentPrice.toFixed(2)}</code>\n\n`;

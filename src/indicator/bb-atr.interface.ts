@@ -1,5 +1,6 @@
 import { EmaTimeframe } from './indicator.interface';
 import { SweepSignal } from '../services/liquiditySweep';
+import type { TierReason } from './signal-classifier';
 
 export interface CandleData {
   time: number;
@@ -83,6 +84,8 @@ export interface BbAtrState {
   signalReason: string;
   sweepSignal?: SweepSignal;
   alertTier?: 0 | 1 | 2 | 3;
+  tierReason?: TierReason;
+  rejectionCandleTime?: number;
   updatedAt: Date;
 }
 

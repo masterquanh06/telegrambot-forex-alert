@@ -736,8 +736,8 @@ Gõ lệnh theo cú pháp:
       await this.smcService.setTier2(chatId, isNowOn);
       await ctx.answerCbQuery(
         isNowOn
-          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
-          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
+          ? '🔥 Đã BẬT cảnh báo Tier 3 (BB ± ATR + Nến rút râu M5)!'
+          : '🔕 Đã TẮT cảnh báo Tier 3 (BB ± ATR + Nến rút râu M5)!',
       );
       const { text, keyboard } = await this.renderBbAtrDashboardView(chatId, 'XAU', 'M5');
       try {
@@ -1047,8 +1047,8 @@ Gõ lệnh theo cú pháp:
       const isNowOn = updated.tier2AlertEnabled !== false;
       await ctx.answerCbQuery(
         isNowOn
-          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
-          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
+          ? '🔥 Đã BẬT cảnh báo Tier 3 VIP (NWE H1 + OB + Rút râu M15)!'
+          : '🔕 Đã TẮT cảnh báo Tier 3 VIP (NWE H1 + OB + Rút râu M15)!',
       );
       try {
         const { text, keyboard } = await this.renderNweDashboardView(chatId, currentViewTf);
@@ -1069,9 +1069,10 @@ Dải Nadaraya-Watson Envelope sử dụng thuật toán hồi quy hạt nhân p
 • 🟢 <b>Dải Dưới (Lower Band):</b> Vùng quá bán cực hạn (Extreme Oversold). Giá chạm hoặc thủng dải dưới kết hợp cản động hỗ trợ là tín hiệu đảo chiều tăng -> <b>Canh BUY</b>.
 • 🛡 <b>Dynamic S/R:</b> Các đường hỗ trợ / kháng cự biến thiên theo cấu trúc sóng của thị trường.
 
-🔔 <b>Cảnh báo tự động:</b>
-• Bật/Tắt cảnh báo chung bằng nút bấm [🔔 Bật Cảnh Báo NWE].
-• Tự do bật/tắt từng khung thời gian (M5, M15, M30, H1, H4, D1).
+🔔 <b>Hệ thống 3 tầng Cảnh báo SMC + NWE:</b>
+• 🔔 <b>TIER 1:</b> Chạm NWE đơn lẻ hoặc Order Block đơn lẻ trên từng khung thời gian.
+• 🔥🔥 <b>TIER 2 (MTF Confluence):</b> Chạm biên <b>NWE H1</b> ĐỒNG THỜI giao cắt ít nhất 1 khối <b>Order Block (M15, M30, H1, H4)</b>.
+• 🔥🔥🔥 <b>TIER 3 (VIP):</b> Thỏa Tier 2 CỘNG VỚI xuất hiện <b>nến rút râu từ chối khung M15</b> trong vùng hợp lưu (lọc chuẩn theo ATR M15).
 • Khung thời gian tối ưu cho XAU/USD: <b>M15 & H1</b>.
       `.trim();
       const keyboard = Markup.inlineKeyboard([
@@ -1154,8 +1155,8 @@ Dải Nadaraya-Watson Envelope sử dụng thuật toán hồi quy hạt nhân p
       const isNowOn = updated.tier2AlertEnabled !== false;
       await ctx.answerCbQuery(
         isNowOn
-          ? '🔥 Đã BẬT cảnh báo Tier 2 (Quét thanh khoản)!'
-          : '🔕 Đã TẮT cảnh báo Tier 2 (Quét thanh khoản)!',
+          ? '🔥 Đã BẬT cảnh báo Tier 3 VIP (NWE H1 + OB + Rút râu M15)!'
+          : '🔕 Đã TẮT cảnh báo Tier 3 VIP (NWE H1 + OB + Rút râu M15)!',
       );
       try {
         const { text, keyboard } = await this.renderObDashboardView(chatId, currentViewTf);
@@ -1176,8 +1177,10 @@ Order Block (OB) là các vùng tích lũy lệnh lớn của tổ chức tài c
 • 🟢 <b>Vùng Cầu (Demand Zone / Bullish OB):</b> Cây nến giảm cuối cùng trước cú bơm mạnh phá vỡ cấu trúc đỉnh. Khi giá hồi về vùng này -> <b>Ưu tiên Canh BUY</b>.
 • ❌ <b>Triệt tiêu (Mitigation):</b> Một vùng OB khi bị giá đâm xuyên qua thân nến sẽ bị coi là đã triệt tiêu và bot sẽ tự động loại bỏ.
 
-🔥 <b>Tín hiệu VIP Tier 2 (Quét Thanh Khoản - SFP):</b>
-• Khi giá chạm vào OB mà nến đồng thời rút râu quét sạch đỉnh/đáy thanh khoản (Liquidity Sweep) -> Tín hiệu xác suất thắng cực cao!
+🔥 <b>Hệ thống phân cấp SMC + NWE (Tier 1 → Tier 2 → Tier 3 VIP):</b>
+• 🔔 <b>TIER 1:</b> Chạm Order Block hoặc biên NWE đơn lẻ từng khung.
+• 🔥🔥 <b>TIER 2 (MTF Confluence):</b> Chạm biên <b>NWE H1</b> ĐỒNG THỜI giao cắt ít nhất 1 khối <b>OB thuộc M15, M30, H1 hoặc H4</b>.
+• 🔥🔥🔥 <b>TIER 3 (VIP):</b> Thỏa Tier 2 CỘNG VỚI xuất hiện <b>nến rút râu từ chối khung M15</b> bên trong vùng hợp lưu OB (không phá vỡ mép ngoài OB, lọc chuẩn theo ATR M15)!
       `.trim();
       const keyboard = Markup.inlineKeyboard([
         [Markup.button.callback('📊 Quay lại Bảng Order Block M15', 'ob_view:M15')],
@@ -1605,7 +1608,7 @@ ${summaryTag}
       ],
       [
         Markup.button.callback(
-          isTier2On ? '🔥 Tier 2 (Quét TK): ✅ BẬT' : '🔥 Tier 2 (Quét TK): ❌ TẮT',
+          isTier2On ? '🔥 Tier 3 (Rút Râu M15): ✅ BẬT' : '🔥 Tier 3 (Rút Râu M15): ❌ TẮT',
           `nwe_toggle_tier2:${validTf}`,
         ),
         Markup.button.callback('ℹ️ Hướng Dẫn NWE', 'nwe_help'),
@@ -1667,7 +1670,7 @@ ${summaryTag}
       ],
       [
         Markup.button.callback(
-          isTier2On ? '🔥 Tier 2 (Quét TK): ✅ BẬT' : '🔥 Tier 2 (Quét TK): ❌ TẮT',
+          isTier2On ? '🔥 Tier 3 (Rút Râu M15): ✅ BẬT' : '🔥 Tier 3 (Rút Râu M15): ❌ TẮT',
           `ob_toggle_tier2:${validTf}`,
         ),
         Markup.button.callback('ℹ️ Hướng Dẫn OB', 'ob_help'),
@@ -1871,7 +1874,7 @@ ${summaryTag}
       ],
       [
         Markup.button.callback(
-          isTier2Enabled ? '🔥 Tier 3 (Quét TK): ✅ BẬT' : '🔥 Tier 3 (Quét TK): ❌ TẮT',
+          isTier2Enabled ? '🔥 Tier 3 (Rút Râu M5): ✅ BẬT' : '🔥 Tier 3 (Rút Râu M5): ❌ TẮT',
           'bbatr_toggle_tier2',
         ),
         Markup.button.callback('ℹ️ Hướng Dẫn', 'bbatr_help'),
@@ -1946,12 +1949,12 @@ ${summaryTag}
 • <b>Hành động:</b> Khi giá chạm hoặc đâm thủng ngưỡng này trên nến M5, canh mở vị thế MUA (Long) bắt đáy hồi phục.
 
 <b>3. HỆ THỐNG PHÂN CẤP CẢNH BÁO (TIER SYSTEM):</b>
-• 🔔 <b>Cảnh Báo Chạm Dải BB:</b> Giá nến M5 chạm dải Bands(20) Upper hoặc Bands(20) Lower -> Cảnh báo theo dõi thông thường.
+• 🔔 <b>TIER 0 (Chạm Dải BB):</b> Giá nến M5 chạm dải <code>Bands(20) Upper</code> hoặc <code>Bands(20) Lower</code> -> Cảnh báo theo dõi thông thường.
 • 🔥 <b>TIER 1 (1 Đốm Lửa):</b> Khớp công thức Entry mở rộng <code>Bands(20) Upper + ATR(14)</code> hoặc <code>Bands(20) Lower - ATR(14)</code>.
-• 🔥🔥 <b>TIER 2 (2 Đốm Lửa):</b> Khớp công thức Entry BB+ATR CỘNG VỚI chỉ số RSI cực trị:
-   - SELL: <code>BB Upper + ATR</code> VÀ <code>RSI(14) ≥ 70</code> (Quá Mua)
-   - BUY: <code>BB Lower - ATR</code> VÀ <code>RSI(14) ≤ 30</code> (Quá Bán)
-• 🔥🔥🔥 <b>TIER 3 (3 Đốm Lửa - VIP):</b> Tín hiệu tối thượng khi có thêm <b>Quét Thanh Khoản Thật (True Liquidity Sweep)</b> khung M15 rút râu nến đảo chiều!
+• 🔥🔥 <b>TIER 2 (2 Đốm Lửa — Thỏa 1 trong 2 điều kiện):</b>
+   - <b>Tier 2A (BB ± ATR + RSI cực trị):</b> <code>BB Upper + ATR</code> + <code>RSI(14) ≥ 70</code> (SELL) hoặc <code>BB Lower - ATR</code> + <code>RSI(14) ≤ 30</code> (BUY).
+   - <b>Tier 2B (Nến rút râu từ chối tại dải BB):</b> Nến M5 đâm xuyên <code>BB Upper</code> / <code>BB Lower</code> và đóng thụt vào trong với râu từ chối mạnh (Pinbar hoặc nến đảo chiều thuận màu), không bắt buộc phải chạm <code>BB ± ATR</code>.
+• 🔥🔥🔥 <b>TIER 3 (3 Đốm Lửa - VIP):</b> Khớp vùng <code>BB ± ATR</code> CỘNG VỚI <b>Nến rút râu từ chối M5</b> ngay tại mốc <code>BB Upper + ATR</code> (SELL) hoặc <code>BB Lower - ATR</code> (BUY)!
 
 <b>4. BỘ LỌC XU HƯỚNG CHÍNH TRONG NGÀY (DAILY TREND BIAS):</b>
 • 🟢 <b>BUY ONLY:</b> Khi xu hướng ngày là Tăng mạnh, chỉ nhận cảnh báo khi giá chạm Lower Entry để BUY (bỏ qua Upper Entry).
