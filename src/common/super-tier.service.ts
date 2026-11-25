@@ -1,5 +1,6 @@
 import { Injectable, Logger, Inject, Optional, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
+import { SubscriberCacheService } from './subscriber-cache.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { CallMeBotService } from './callmebot.service';
 import {
@@ -36,6 +37,8 @@ export class SuperTierService {
     private readonly telegramService: TelegramService,
     @Optional()
     private readonly callMeBotService?: CallMeBotService,
+    @Optional()
+    private readonly subscriberCache?: SubscriberCacheService,
   ) {}
 
   registerActiveChat(chatId: string) {
@@ -161,11 +164,13 @@ export class SuperTierService {
     const knownDbChatIds = new Set<string>();
 
     try {
-      const users = await this.prisma.executeWithRetry(() =>
-        this.prisma.telegramUser.findMany({
-          select: { chatId: true, tier2AlertEnabled: true },
-        }),
-      );
+      const users: any[] = this.subscriberCache?.isReady()
+        ? this.subscriberCache.getAll()
+        : await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: { chatId: true, tier2AlertEnabled: true },
+            }),
+          );
 
       if (users && users.length > 0) {
         for (const u of users) {
@@ -206,11 +211,14 @@ export class SuperTierService {
       );
 
       results.forEach((res, idx) => {
-        if (res.status === 'fulfilled') {
+        if (res.status === 'fulfilled' && res.value !== false) {
           sentCount++;
         } else {
           const failedChatId = batch[idx];
-          const reasonMsg = res.reason?.message || String(res.reason);
+          const reasonMsg =
+            res.status === 'rejected'
+              ? res.reason?.message || String(res.reason)
+              : 'sendMessage trả về false';
           this.logger.warn(`Lỗi gửi TIER SSS tới chatId=${failedChatId}: ${reasonMsg}`);
         }
       });
@@ -237,21 +245,18 @@ export class SuperTierService {
   }
 
   /**
-   * Render tin nhắn Telegram cực kỳ nổi bật và an toàn parse_mode HTML cho TIER SSS (Siêu Hợp Lưu)
+   * Render tin nhắn Telegram cực kỳ nổi bật, đọc nhanh < 2 giây, 1 chạm copy và an toàn parse_mode HTML cho TIER SSS
    */
   renderTierSssMessage(result: TierSssResult): string {
     const isSell = result.direction === 'SELL';
     const dirEmoji = isSell ? '🔴🔴' : '🟢🟢';
-    const dirLabel = isSell ? 'SELL / SHORT' : 'BUY / LONG';
+    const dirAction = isSell ? 'SELL' : 'BUY';
 
     const nowStr = new Intl.DateTimeFormat('vi-VN', {
       timeZone: 'Asia/Ho_Chi_Minh',
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
     }).format(new Date(result.triggeredAtMs));
 
     const delayText = this.formatDelayText(result.timeDiffMs);
@@ -268,50 +273,48 @@ export class SuperTierService {
       Array.isArray(smcDetails.matchedOrderBlocks) ? smcDetails.matchedOrderBlocks : [];
     const obTfList =
       matchedObs.length > 0
-        ? Array.from(new Set(matchedObs.map((o) => o.timeframe))).join(' + ')
+        ? Array.from(new Set(matchedObs.map((o) => o.timeframe))).join('+')
         : primaryOb?.timeframe || 'M15/H1';
     const smcAtrText = smcDetails.atrM15 !== undefined ? Number(smcDetails.atrM15).toFixed(2) : 'N/A';
 
     const slDistance = Math.abs(result.entryPrice - result.safestSl);
 
-    let msg = `👑💎🔥🔥🔥 ${dirEmoji} <b>[TIER SSS - SIÊU HỢP LƯU] BB+ATR M5 (TIER 3) + SMC/NWE M15 (TIER 3)!</b>\n`;
+    let msg = `👑💎🔥🔥🔥 ${dirEmoji} <b>${dirAction} XAU/USD • TIER SSS</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `💎 <b>Tài sản:</b> <code>XAU/USD (Vàng Forex)</code>\n`;
-    msg += `🧭 <b>Hướng giao dịch:</b> <b>${isSell ? '🔴 BÁN (SELL / SHORT)' : '🟢 MUA (BUY / LONG)'}</b>\n`;
-    msg += `💵 <b>Giá hiện tại:</b> <code>$${result.entryPrice.toFixed(2)}</code>\n`;
-    msg += `⏱ <b>Độ trễ hợp lưu:</b> <b>${delayText}</b> <i>(trong cửa sổ 20 phút)</i>\n\n`;
-
-    msg += `🏛 <b>TRỤ CỘT 1 — BB+ATR M5 (TIER 3 VIP):</b>\n`;
-    if (bbEntryLevel !== undefined) {
-      msg += `  • 🎯 Mốc Entry cực hạn (${isSell ? 'BB Upper + ATR' : 'BB Lower - ATR'}): <code>$${Number(bbEntryLevel).toFixed(2)}</code>\n`;
-    }
-    msg += `  • 🕯 Xác nhận: <b>Nến rút râu từ chối M5</b> tại mốc Entry (ATR M5: <code>${bbAtrText}</code> | RSI: <code>${bbRsiText}</code>)\n`;
-    msg += `  • 🛑 SL riêng BB+ATR: <code>$${result.bbEvent.slPrice.toFixed(2)}</code>\n\n`;
-
-    msg += `🏛 <b>TRỤ CỘT 2 — SMC/NWE ĐA KHUNG (TIER 3 VIP):</b>\n`;
-    if (nweBand !== undefined) {
-      msg += `  • 🌊 Biên ${isSell ? 'trên' : 'dưới'} NWE H1: <code>$${Number(nweBand).toFixed(2)}</code>\n`;
-    }
-    if (primaryOb) {
-      msg += `  • 🧱 Order Block (${this.escapeHtml(obTfList)}): <code>$${Number(primaryOb.bottom).toFixed(2)} - $${Number(primaryOb.top).toFixed(2)}</code>\n`;
-    }
-    msg += `  • 🕯 Xác nhận: <b>Nến rút râu từ chối M15</b> trong vùng OB (ATR M15: <code>${smcAtrText}</code>)\n`;
-    msg += `  • 🛑 SL riêng SMC/NWE: <code>$${result.smcEvent.slPrice.toFixed(2)}</code>\n\n`;
-
-    msg += `🎯 <b>KẾ HOẠCH VÀO LỆNH HỢP NHẤT (TIER SSS):</b>\n`;
-    msg += `• 🎯 <b>Vùng vào lệnh (${dirLabel}):</b> quanh <code>$${result.entryPrice.toFixed(2)}</code>\n`;
-    msg += `• 🛡 <b>Cắt Lỗ an toàn nhất (SL hợp nhất):</b> <code>$${result.safestSl.toFixed(2)}</code> <i>(Biên độ: $${slDistance.toFixed(2)})</i>\n`;
+    msg += `🎯 <b>ENTRY:</b> <code>${result.entryPrice.toFixed(2)}</code> <i>(Hợp lưu BB M5 + SMC M15)</i>\n`;
+    msg += `🛑 <b>SL AN TOÀN:</b> <code>${result.safestSl.toFixed(2)}</code> <b>(-${slDistance.toFixed(2)})</b> <i>· Hợp nhất 2 hệ thống</i>\n`;
     if (result.tp1Price !== undefined) {
-      msg += `• 🎯 <b>Mục tiêu TP1 (BB Middle M5):</b> <code>$${result.tp1Price.toFixed(2)}</code>\n`;
+      const tp1Diff = isSell ? result.entryPrice - result.tp1Price : result.tp1Price - result.entryPrice;
+      const tp1Sign = tp1Diff >= 0 ? '+' : '-';
+      const tp1RR = slDistance > 0 ? (Math.abs(tp1Diff) / slDistance).toFixed(1) : '0.0';
+      msg += `✅ <b>TP1:</b> <code>${result.tp1Price.toFixed(2)}</code> <i>(${tp1Sign}${Math.abs(tp1Diff).toFixed(2)} · BB Mid M5 · 1:${tp1RR})</i>\n`;
     }
     if (result.tp2Price !== undefined) {
-      msg += `• 🎯 <b>Mục tiêu TP2 (NWE H1 Kernel):</b> <code>$${result.tp2Price.toFixed(2)}</code>\n`;
+      const tp2Diff = isSell ? result.entryPrice - result.tp2Price : result.tp2Price - result.entryPrice;
+      const tp2Sign = tp2Diff >= 0 ? '+' : '-';
+      const tp2RR = slDistance > 0 ? (Math.abs(tp2Diff) / slDistance).toFixed(1) : '0.0';
+      msg += `✅ <b>TP2:</b> <code>${result.tp2Price.toFixed(2)}</code> <i>(${tp2Sign}${Math.abs(tp2Diff).toFixed(2)} · NWE H1 Kernel · 1:${tp2RR})</i>\n`;
     }
-    msg += `🕒 <b>Thời điểm hội tụ:</b> <code>${nowStr}</code>\n\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
 
-    msg += `👑 <b>Khuyến nghị chiến lược [TIER SSS — ĐỘ TIN CẬY CAO NHẤT HỆ THỐNG]:</b>\n`;
-    msg += `• Cả 2 hệ thống độc lập (động lượng cực trị BB+ATR M5 và cấu trúc tổ chức NWE H1 + OB + Rút râu M15) đều xác nhận đảo chiều cùng chiều <b>${dirLabel}</b>.\n`;
-    msg += `• Ưu tiên cao nhất hệ thống — quản trị rủi ro chuẩn theo mức SL an toàn <code>$${result.safestSl.toFixed(2)}</code> và chốt lời từng phần tại TP1 và TP2.`;
+    let pillar1 = `🏛 <b>BB+ATR M5 (T3):</b> `;
+    if (bbEntryLevel !== undefined) {
+      pillar1 += `Entry <code>${Number(bbEntryLevel).toFixed(2)}</code> · `;
+    }
+    pillar1 += `SL <code>${result.bbEvent.slPrice.toFixed(2)}</code> · ATR <code>${bbAtrText}</code> · RSI <code>${bbRsiText}</code>\n`;
+
+    let pillar2 = `🏛 <b>SMC/NWE M15 (T3):</b> `;
+    if (nweBand !== undefined) {
+      pillar2 += `NWE H1 <code>${Number(nweBand).toFixed(2)}</code> · `;
+    }
+    if (primaryOb) {
+      pillar2 += `OB (${this.escapeHtml(obTfList)}) <code>${Number(primaryOb.bottom).toFixed(2)}</code>–<code>${Number(primaryOb.top).toFixed(2)}</code> · `;
+    }
+    pillar2 += `SL <code>${result.smcEvent.slPrice.toFixed(2)}</code> · ATR <code>${smcAtrText}</code>\n`;
+
+    msg += pillar1;
+    msg += pillar2;
+    msg += `⏱ <b>Hội tụ:</b> <b>${delayText}</b> · 🕒 <code>${nowStr}</code>`;
 
     return msg;
   }

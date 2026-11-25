@@ -5,6 +5,7 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const logger = new Logger('StockNewsBot');
   const app = await NestFactory.create(AppModule);
+  app.enableShutdownHooks();
 
   let port = Number(process.env.PORT) || 3001;
   const maxRetries = 5;

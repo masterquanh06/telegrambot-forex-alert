@@ -12,6 +12,7 @@ import { IndicatorModule } from './indicator/indicator.module';
 import { SmcModule } from './smc/smc.module';
 import { LiquiditySweepModule } from './services/liquiditySweep.module';
 import { SuperTierModule } from './common/super-tier.module';
+import { SubscriberCacheModule } from './common/subscriber-cache.module';
 
 @Controller()
 class HelloController {
@@ -28,6 +29,7 @@ class HelloController {
     ConfigModule.forRoot({ isGlobal: true }),
     ScheduleModule.forRoot(),
     PrismaModule,
+    SubscriberCacheModule,
     WatchlistModule,
     TelegramModule,
     CronModule,

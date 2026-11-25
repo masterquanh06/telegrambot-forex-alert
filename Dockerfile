@@ -22,8 +22,8 @@ COPY . .
 RUN npx prisma generate
 RUN npm run build
 
-# Xoá bớt devDependencies không cần thiết
-RUN npm prune --production
+# Xoá bớt devDependencies không cần thiết và đảm bảo Prisma Client còn nguyên vẹn
+RUN npm prune --production && npx prisma generate
 
 # ==========================================
 # 2. Production Runtime Stage

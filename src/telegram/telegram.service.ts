@@ -1471,8 +1471,8 @@ Order Block (OB) là các vùng tích lũy lệnh lớn của tổ chức tài c
    * Phương thức hỗ trợ gửi thông báo tự động từ Cron job tới Telegram Chat (kèm nút bấm nếu có)
    * Tự động chia nhỏ tin nhắn nếu nội dung vượt quá giới hạn Telegram
    */
-  async sendMessage(chatId: string, message: string, keyboard?: any) {
-    if (!this.bot) return;
+  async sendMessage(chatId: string, message: string, keyboard?: any): Promise<boolean> {
+    if (!this.bot) return false;
     try {
       if (message.length <= 4000) {
         if (keyboard) {
@@ -1492,8 +1492,10 @@ Order Block (OB) là các vùng tích lũy lệnh lớn của tổ chức tài c
           }
         }
       }
+      return true;
     } catch (error: any) {
       this.logger.error(`Lỗi khi gửi tin nhắn tới Telegram Chat ID ${chatId}: ${error.message}`);
+      return false;
     }
   }
 

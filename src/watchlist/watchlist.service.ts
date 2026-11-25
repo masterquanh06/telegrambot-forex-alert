@@ -1,17 +1,22 @@
-import { Injectable, Logger } from "@nestjs/common";
+import { Injectable, Logger, Optional } from "@nestjs/common";
 import { TelegramUser } from "@prisma/client";
 import { PrismaService } from "../prisma/prisma.service";
+import { SubscriberCacheService } from "../common/subscriber-cache.service";
 
 @Injectable()
 export class WatchlistService {
   private readonly logger = new Logger(WatchlistService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    @Optional() private readonly subscriberCache?: SubscriberCacheService,
+  ) {}
 
   /**
    * Đăng ký thông tin User khi có người tương tác với Telegram Bot
    */
   async registerUser(chatId: string, username?: string) {
+    this.subscriberCache?.ensure(chatId);
     try {
       await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.upsert({

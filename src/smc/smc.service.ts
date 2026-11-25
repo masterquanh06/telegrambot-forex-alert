@@ -20,6 +20,8 @@ import {
   SMC_MTF_OB_TIMEFRAMES,
 } from './smc-mtf-classifier';
 import { SuperTierService } from '../common/super-tier.service';
+import { SubscriberCacheService } from '../common/subscriber-cache.service';
+import { createLeadingTrailingThrottle } from '../common/throttle';
 import { CallMeBotService } from '../common/callmebot.service';
 
 @Injectable()
@@ -32,10 +34,40 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
   private isTvWsConnecting = false;
   private isDestroyed = false;
   private tvWsReconnectTimer: NodeJS.Timeout | null = null;
+  private tvWsWatchdogTimer: NodeJS.Timeout | null = null;
+  private lastTvWsMessageAt = 0;
+  private tvWsConnectingSince = 0;
+  private readonly TV_WS_WATCHDOG_TICK_MS = 5_000;
+  private readonly TV_WS_PING_INTERVAL_MS = Math.max(5_000, Number(process.env.WS_PING_INTERVAL_MS) || 15_000);
+  private readonly TV_WS_STALE_TIMEOUT_MS = Math.max(15_000, Number(process.env.WS_STALE_TIMEOUT_MS) || 35_000);
+  private readonly TV_WS_CLOCK_JUMP_THRESHOLD_MS = 30_000;
+  private readonly TV_WS_RECONNECT_BASE_DELAY_MS = 1_000;
+  private readonly TV_WS_RECONNECT_MAX_DELAY_MS = 30_000;
+  private lastTvWatchdogTickAt = 0;
+  private lastTvWsPingAt = 0;
+  private tvWsReconnectAttempt = 0;
+  private tvWsHasEverOpened = false;
+  private tvWsNeedsPostReconnectScan = false;
+  private tvWsReconnectAt = 0;
   private readonly tvSessionToTf = new Map<string, SmcTimeframe>();
   private readonly liveTvCandlesMap = new Map<SmcTimeframe, CandleData[]>();
   private readonly inFlightTvFetch = new Map<string, Promise<CandleData[] | null>>();
   private lastDataSource: 'TVC:GOLD' | 'BINANCE' = 'TVC:GOLD';
+
+  // Memoize detectOrderBlocks theo (timeframe, nến cuối) để quét MTF 1s/lần không tốn CPU
+  private readonly obMemoCache = new Map<
+    SmcTimeframe,
+    {
+      key: string;
+      result: {
+        activeDemand: OrderBlock[];
+        activeSupply: OrderBlock[];
+        keyLevels: KeyLevel[];
+        touchingDemand: OrderBlock | null;
+        touchingSupply: OrderBlock | null;
+      };
+    }
+  >();
 
   // Cache nến klines theo khung thời gian (8 giây)
   private readonly klinesCache = new Map<string, { candles: CandleData[]; time: number }>();
@@ -56,6 +88,10 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
 
   // Mutex chống Race Condition cho vòng quét SMC/NWE
   private isCheckingSmc = false;
+
+  // Event-driven MTF scan: kích hoạt từ tick WS (throttle 1000ms), dùng chung mutex isCheckingSmc với cron
+  private readonly MTF_EVENT_TFS = new Set<string>(['M15', 'M30', 'H1', 'H4']);
+  private readonly mtfEventThrottle = createLeadingTrailingThrottle(() => this.runMtfScanFromTick(), 1000);
 
   // State quản lý Hợp lưu Chéo Khung (MTF: NWE H1 + OB M15/M30/H1/H4 -> Tier 2 & Tier 3 Rút râu M15)
   private lastMtfSignal: 'NORMAL' | 'CONFLUENCE_SELL' | 'CONFLUENCE_BUY' = 'NORMAL';
@@ -109,16 +145,150 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     private readonly superTierService?: SuperTierService,
     @Optional()
     private readonly callMeBotService?: CallMeBotService,
+    @Optional()
+    private readonly subscriberCache?: SubscriberCacheService,
   ) {}
 
   onModuleInit() {
     this.isDestroyed = false;
     this.initTradingViewMultiTfStream();
+    this.startTvWsWatchdog();
   }
 
   onModuleDestroy() {
     this.isDestroyed = true;
     this.stopTradingViewMultiTfStream();
+  }
+
+  /**
+   * Kiểm tra WebSocket đa khung TVC:GOLD còn nhận dữ liệu/heartbeat mới không
+   * (Chống Zombie Socket đóng băng nến khi Mac sleep hoặc đổi mạng)
+   */
+  private isTvWsFresh(): boolean {
+    return (
+      this.isTvWsConnected &&
+      this.tvWs?.readyState === 1 &&
+      this.lastTvWsMessageAt > 0 &&
+      Date.now() - this.lastTvWsMessageAt < this.TV_WS_STALE_TIMEOUT_MS
+    );
+  }
+
+  private isMtfLiveReady(): boolean {
+    if (!this.isTvWsFresh()) return false;
+    for (const tf of this.MTF_EVENT_TFS) {
+      if ((this.liveTvCandlesMap.get(tf as SmcTimeframe)?.length ?? 0) < 50) return false;
+    }
+    return true;
+  }
+
+  private runMtfScanFromTick() {
+    if (this.isDestroyed || this.isCheckingSmc || !this.isMtfLiveReady()) return;
+    this.isCheckingSmc = true;
+    this.checkMtfNweH1ObAlert()
+      .catch((e: any) => this.logger.debug(`Event MTF scan lỗi: ${e?.message}`))
+      .finally(() => {
+        this.isCheckingSmc = false;
+      });
+  }
+
+  private startTvWsWatchdog() {
+    if (this.tvWsWatchdogTimer) return;
+    this.lastTvWatchdogTickAt = Date.now();
+    this.tvWsWatchdogTimer = setInterval(() => {
+      if (this.isDestroyed) return;
+      const now = Date.now();
+      const tickDelta = this.lastTvWatchdogTickAt > 0 ? now - this.lastTvWatchdogTickAt : 0;
+      this.lastTvWatchdogTickAt = now;
+
+      if (tickDelta > this.TV_WS_CLOCK_JUMP_THRESHOLD_MS && (this.tvWs || this.isTvWsConnecting)) {
+        this.forceReconnectTvWs(`phát hiện clock jump/sleep (${Math.round(tickDelta / 1000)}s)`);
+        return;
+      }
+
+      if (this.tvWs) {
+        const isOpen = this.tvWs.readyState === 1;
+        const idleMs = this.lastTvWsMessageAt > 0 ? now - this.lastTvWsMessageAt : 0;
+
+        if (this.isTvWsConnecting && this.tvWsConnectingSince > 0 && now - this.tvWsConnectingSince >= 20_000) {
+          this.forceReconnectTvWs('treo ở trạng thái kết nối (handshake > 20s)');
+          return;
+        }
+
+        if (!isOpen && !this.isTvWsConnecting) {
+          this.forceReconnectTvWs('socket không ở trạng thái OPEN');
+          return;
+        }
+
+        if (this.isTvWsConnected && this.lastTvWsMessageAt > 0 && idleMs >= this.TV_WS_STALE_TIMEOUT_MS) {
+          this.forceReconnectTvWs(`không nhận dữ liệu/heartbeat suốt ${Math.round(idleMs / 1000)}s (zombie socket)`);
+          return;
+        }
+
+        if (isOpen && now - this.lastTvWsPingAt >= this.TV_WS_PING_INTERVAL_MS) {
+          this.lastTvWsPingAt = now;
+          try {
+            this.tvWs.ping();
+          } catch (e) {
+            this.forceReconnectTvWs('gửi WebSocket ping thất bại');
+          }
+        }
+      } else if (!this.isTvWsConnecting && !this.tvWsReconnectTimer) {
+        this.initTradingViewMultiTfStream();
+      }
+    }, this.TV_WS_WATCHDOG_TICK_MS);
+  }
+
+  private computeTvWsReconnectDelayMs(): number {
+    const exp = Math.min(
+      this.TV_WS_RECONNECT_MAX_DELAY_MS,
+      this.TV_WS_RECONNECT_BASE_DELAY_MS * Math.pow(2, this.tvWsReconnectAttempt),
+    );
+    const jitter = Math.floor(Math.random() * 500);
+    return exp + jitter;
+  }
+
+  private forceReconnectTvWs(reason: string) {
+    if (this.isDestroyed) return;
+    this.logger.warn(`⚠️ [SMC/NWE Live WS] Phát hiện kết nối treo (${reason}). Đang ép ngắt và kết nối lại...`);
+
+    const staleWs = this.tvWs;
+    this.tvWs = null;
+    this.isTvWsConnected = false;
+    this.isTvWsConnecting = false;
+    this.tvWsConnectingSince = 0;
+    this.lastTvWsMessageAt = 0;
+    this.lastTvWsPingAt = 0;
+    if (this.tvWsReconnectAt === 0) {
+      this.tvWsReconnectAt = Date.now();
+    }
+
+    if (staleWs) {
+      try {
+        if (typeof staleWs.terminate === 'function') {
+          staleWs.terminate();
+        } else {
+          staleWs.close();
+        }
+      } catch (e) {}
+    }
+
+    if (this.tvWsReconnectTimer) {
+      clearTimeout(this.tvWsReconnectTimer);
+      this.tvWsReconnectTimer = null;
+    }
+
+    this.scheduleTvWsReconnect();
+  }
+
+  /** Đồng bộ ngay cài đặt NWE/SMC/Tier2 của user vào SubscriberCache (RAM) */
+  private syncSubscriberCache(chatId: string, s: UserSmcSettings) {
+    this.subscriberCache?.patch(chatId, {
+      nweAlertEnabled: s.nweAlertEnabled,
+      nweTimeframes: [...(s.nweTimeframes || s.timeframes || [])],
+      smcAlertEnabled: s.smcAlertEnabled,
+      smcTimeframes: [...(s.smcTimeframes || s.timeframes || [])],
+      tier2AlertEnabled: s.tier2AlertEnabled !== false,
+    });
   }
 
   registerActiveChat(chatId: string) {
@@ -134,52 +304,72 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
   private initTradingViewMultiTfStream() {
     if (this.isDestroyed || this.isTvWsConnecting || this.isTvWsConnected) return;
     this.isTvWsConnecting = true;
+    this.tvWsConnectingSince = Date.now();
 
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const WebSocket = require('ws');
-      this.tvWs = new WebSocket('wss://data.tradingview.com/socket.io/websocket', {
+      const ws = new WebSocket('wss://data.tradingview.com/socket.io/websocket', {
         headers: {
           Origin: 'https://www.tradingview.com',
           'User-Agent':
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
         },
+        handshakeTimeout: 10_000,
       });
+      this.tvWs = ws;
 
       const createMsg = (func: string, args: any[]) => {
         const json = JSON.stringify({ m: func, p: args });
         return '~m~' + json.length + '~m~' + json;
       };
 
-      this.tvWs.on('open', () => {
+      ws.on('open', () => {
+        if (this.tvWs !== ws) return;
         this.isTvWsConnected = true;
         this.isTvWsConnecting = false;
+        const openNow = Date.now();
+        this.lastTvWsMessageAt = openNow;
+        this.lastTvWsPingAt = openNow;
+        if (this.tvWsHasEverOpened) {
+          this.tvWsNeedsPostReconnectScan = true;
+        }
+        this.tvWsHasEverOpened = true;
         this.tvSessionToTf.clear();
         this.liveTvCandlesMap.clear();
+        this.obMemoCache.clear();
         this.logger.log(
           '🟢 [SMC/NWE Live WS] Đã kết nối TradingView TVC:GOLD đa khung (M5, M15, M30, H1, H4, D1 — 500 nến/khung)!',
         );
 
-        this.tvWs.send(createMsg('set_auth_token', ['unauthorized_user_token']));
+        ws.send(createMsg('set_auth_token', ['unauthorized_user_token']));
         for (const tf of this.supportedTimeframes) {
           const tvInterval = this.tradingViewIntervalMap[tf];
           const cs = `cs_smc_${tf}_${Math.random().toString(36).substring(2, 8)}`;
           this.tvSessionToTf.set(cs, tf);
-          this.tvWs.send(createMsg('chart_create_session', [cs, '']));
-          this.tvWs.send(
+          ws.send(createMsg('chart_create_session', [cs, '']));
+          ws.send(
             createMsg('resolve_symbol', [cs, 'sds_sym_1', '={"symbol":"TVC:GOLD","adjustment":"splits"}']),
           );
-          this.tvWs.send(createMsg('create_series', [cs, 'sds_1', 's1', 'sds_sym_1', tvInterval, 500, '']));
+          ws.send(createMsg('create_series', [cs, 'sds_1', 's1', 'sds_sym_1', tvInterval, 500, '']));
         }
       });
 
-      this.tvWs.on('message', (data: any) => {
+      ws.on('pong', () => {
+        if (this.tvWs !== ws) return;
+        this.lastTvWsMessageAt = Date.now();
+      });
+
+      ws.on('message', (data: any) => {
+        if (this.tvWs !== ws) return;
+        this.lastTvWsMessageAt = Date.now();
+
         const raw = data.toString();
         const packets = raw.split(/~m~\d+~m~/).filter(Boolean);
         for (const packet of packets) {
           if (packet.startsWith('~h~')) {
-            if (this.tvWs && this.tvWs.readyState === 1) {
-              this.tvWs.send('~m~' + packet.length + '~m~' + packet);
+            if (ws.readyState === 1) {
+              ws.send('~m~' + packet.length + '~m~' + packet);
             }
             continue;
           }
@@ -189,24 +379,47 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
               const sessionId = msg.p?.[0];
               const tf = this.tvSessionToTf.get(sessionId);
               const sds = msg.p?.[1]?.sds_1;
-              if (tf && sds?.s && Array.isArray(sds.s)) {
+              if (tf && sds?.s && Array.isArray(sds.s) && sds.s.length > 0) {
+                this.tvWsReconnectAttempt = 0;
                 this.handleTvCandlesUpdate(tf, sds.s);
+                if (msg.m === 'timescale_update' && this.tvWsNeedsPostReconnectScan && this.isMtfLiveReady()) {
+                  this.tvWsNeedsPostReconnectScan = false;
+                  const elapsedMs = this.tvWsReconnectAt > 0 ? Date.now() - this.tvWsReconnectAt : 0;
+                  this.tvWsReconnectAt = 0;
+                  this.logger.log(
+                    `🔄 [SMC/NWE Live WS] Đã đồng bộ lại nến đa khung sau reconnect${elapsedMs > 0 ? ` (${elapsedMs}ms)` : ''}. Đang quét tín hiệu ngay...`,
+                  );
+                  this.checkAllSmcAlerts().catch((err) => {
+                    this.logger.warn(`Lỗi quét SMC ngay sau WS reconnect: ${err.message}`);
+                  });
+                } else if (this.MTF_EVENT_TFS.has(tf)) {
+                  this.mtfEventThrottle.trigger();
+                }
               }
             }
           } catch (e) {}
         }
       });
 
-      this.tvWs.on('close', () => {
+      ws.on('close', () => {
+        if (this.tvWs !== ws) return;
+        this.tvWs = null;
         this.isTvWsConnected = false;
         this.isTvWsConnecting = false;
+        this.lastTvWsMessageAt = 0;
         this.scheduleTvWsReconnect();
       });
 
-      this.tvWs.on('error', (err: any) => {
+      ws.on('error', (err: any) => {
+        if (this.tvWs !== ws) return;
         this.logger.warn(`⚠️ [SMC/NWE Live WS] Mất kết nối TradingView: ${err.message}. Đang kết nối lại...`);
+        this.tvWs = null;
         this.isTvWsConnected = false;
         this.isTvWsConnecting = false;
+        this.lastTvWsMessageAt = 0;
+        try {
+          ws.terminate?.();
+        } catch (e) {}
         this.scheduleTvWsReconnect();
       });
     } catch (err: any) {
@@ -218,24 +431,46 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
 
   private scheduleTvWsReconnect() {
     if (this.isDestroyed || this.tvWsReconnectTimer) return;
+    const delayMs = this.computeTvWsReconnectDelayMs();
+    this.tvWsReconnectAttempt++;
+    if (this.tvWsReconnectAt === 0) {
+      this.tvWsReconnectAt = Date.now();
+    }
+    this.logger.warn(`🔄 [SMC/NWE Live WS] Lên lịch reconnect lần #${this.tvWsReconnectAttempt} sau ${delayMs}ms...`);
     this.tvWsReconnectTimer = setTimeout(() => {
       this.tvWsReconnectTimer = null;
       this.initTradingViewMultiTfStream();
-    }, 3000);
+    }, delayMs);
   }
 
   private stopTradingViewMultiTfStream() {
+    this.mtfEventThrottle.cancel();
+    if (this.tvWsWatchdogTimer) {
+      clearInterval(this.tvWsWatchdogTimer);
+      this.tvWsWatchdogTimer = null;
+    }
     if (this.tvWsReconnectTimer) {
       clearTimeout(this.tvWsReconnectTimer);
       this.tvWsReconnectTimer = null;
     }
     if (this.tvWs) {
       try {
-        this.tvWs.close();
+        if (typeof this.tvWs.terminate === 'function') {
+          this.tvWs.terminate();
+        } else {
+          this.tvWs.close();
+        }
       } catch (e) {}
       this.tvWs = null;
     }
     this.isTvWsConnected = false;
+    this.isTvWsConnecting = false;
+    this.tvWsConnectingSince = 0;
+    this.lastTvWsMessageAt = 0;
+    this.lastTvWatchdogTickAt = 0;
+    this.lastTvWsPingAt = 0;
+    this.tvWsNeedsPostReconnectScan = false;
+    this.obMemoCache.clear();
   }
 
   private handleTvCandlesUpdate(tf: SmcTimeframe, rows: any[]) {
@@ -390,9 +625,12 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
   async fetchCandles(timeframe: SmcTimeframe = 'M15', limit = 500): Promise<CandleData[]> {
     // 1. Nguồn ưu tiên số 1: Live WebSocket TradingView TVC:GOLD (0ms latency)
     const liveCandles = this.liveTvCandlesMap.get(timeframe);
-    if (this.isTvWsConnected && liveCandles && liveCandles.length >= Math.min(limit, 50)) {
+    if (this.isTvWsFresh() && liveCandles && liveCandles.length >= Math.min(limit, 50)) {
       this.lastDataSource = 'TVC:GOLD';
       return liveCandles.length > limit ? liveCandles.slice(-limit) : liveCandles;
+    }
+    if (this.isTvWsConnected && !this.isTvWsFresh()) {
+      this.forceReconnectTvWs(`dữ liệu khung ${timeframe} đã cũ`);
     }
 
     const cacheKey = `XAU:${timeframe}`;
@@ -560,6 +798,14 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       };
     }
 
+    const firstCandle = candles[0];
+    const lastCandle = candles[n - 1];
+    const memoKey = `${n}:${firstCandle.time}:${lastCandle.time}:${lastCandle.open}:${lastCandle.high}:${lastCandle.low}:${lastCandle.close}`;
+    const memoized = this.obMemoCache.get(timeframe);
+    if (memoized && memoized.key === memoKey) {
+      return memoized.result;
+    }
+
     const demandZones: OrderBlock[] = [];
     const supplyZones: OrderBlock[] = [];
     const keyLevels: KeyLevel[] = [];
@@ -676,13 +922,15 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       timeframe,
     });
 
-    return {
+    const result = {
       activeDemand,
       activeSupply,
       keyLevels,
       touchingDemand,
       touchingSupply,
     };
+    this.obMemoCache.set(timeframe, { key: memoKey, result });
+    return result;
   }
 
   /**
@@ -818,6 +1066,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.tier2AlertEnabled = current.tier2AlertEnabled === false ? true : false;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -838,6 +1087,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.tier2AlertEnabled = enabled;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -858,6 +1108,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.nweAlertEnabled = !current.nweAlertEnabled;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -878,6 +1129,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.nweAlertEnabled = enabled;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -903,6 +1155,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       current.nweTimeframes.push(tf);
     }
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -923,6 +1176,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.smcAlertEnabled = !current.smcAlertEnabled;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -943,6 +1197,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.smcAlertEnabled = enabled;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -969,6 +1224,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     }
     current.timeframes = current.smcTimeframes;
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -993,6 +1249,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       current.timeframes.push(tf);
     }
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -1013,6 +1270,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.timeframes = [...this.supportedTimeframes];
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -1033,6 +1291,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     const current = await this.getUserSettings(chatId);
     current.timeframes = ['M5', 'M15', 'H1', 'H4'];
     this.userSettingsFallback.set(chatId, current);
+    this.syncSubscriberCache(chatId, current);
 
     try {
       await this.prisma.executeWithRetry(() =>
@@ -1054,7 +1313,9 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
 
     // Nạp từ database
     try {
-      const users = await this.prisma.executeWithRetry(() =>
+      const users: any[] = this.subscriberCache?.isReady()
+        ? this.subscriberCache.getAll()
+        : await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.findMany({
           select: {
             chatId: true,
@@ -1123,11 +1384,14 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       );
 
       results.forEach((res, idx) => {
-        if (res.status === 'fulfilled') {
+        if (res.status === 'fulfilled' && res.value !== false) {
           sentCount++;
         } else {
           const failedChatId = batch[idx];
-          const reasonMsg = res.reason?.message || String(res.reason);
+          const reasonMsg =
+            res.status === 'rejected'
+              ? res.reason?.message || String(res.reason)
+              : 'sendMessage trả về false';
           this.logger.warn(`Lỗi gửi SMC/NWE alert tới chatId=${failedChatId}: ${reasonMsg}`);
         }
       });
@@ -1312,6 +1576,8 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
             `🔔 [SMC/NWE ${tierLabel}] ${payload.signal} tại $${payload.currentPrice} (OB: ${Array.from(matchedObTfs).join('+')}) -> Đã gửi ${sentCount} user.`,
           );
 
+            // SEND-FIRST, LOG-LATER: ghi DB bất đồng bộ, không chặn SSS/CallMeBot
+            void (async () => {
             try {
               await this.prisma.executeWithRetry(() =>
                 this.prisma.smcAlertLog.create({
@@ -1326,7 +1592,10 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
                   },
                 }),
               );
-            } catch (e) {}
+            } catch (e: any) {
+              this.logger.warn(`Ghi SmcAlertLog (MTF) thất bại (bỏ qua): ${e?.message}`);
+            }
+            })();
 
             // Báo cáo sự kiện Tier 3 sang SuperTierService để đánh giá Siêu Hợp Lưu TIER SSS
             // Nếu TIER SSS vừa kích hoạt, SuperTierService đã gọi CallMeBot mức cao nhất -> không gọi trùng SMC Tier 3
@@ -1525,6 +1794,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
               );
 
               // Ghi log vào DB
+              void (async () => {
               try {
                 await this.prisma.executeWithRetry(() =>
                   this.prisma.smcAlertLog.create({
@@ -1539,7 +1809,10 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
                     },
                   }),
                 );
-              } catch (e) {}
+              } catch (e: any) {
+                this.logger.warn(`Ghi SmcAlertLog (Tier 1) thất bại (bỏ qua): ${e?.message}`);
+              }
+              })();
             }
           }
         } catch (err: any) {
@@ -1729,6 +2002,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
 
   /**
    * FORMAT TIN NHẮN CẢNH BÁO HỢP LƯU CHÉO KHUNG (SMC + NWE TIER 2 & TIER 3 VIP)
+   * Tối ưu tốc độ vào lệnh (< 2 giây đọc, 1 chạm copy giá dán MT5)
    */
   renderMtfAlertMessage(payload: SmcMtfAlertPayload): string {
     const nowStr = new Intl.DateTimeFormat('vi-VN', {
@@ -1736,90 +2010,92 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
     }).format(new Date());
 
     const isSell = payload.direction === 'SELL';
     const isTier3 = payload.alertTier === 3;
-    const tfSummary = Array.from(new Set(payload.matchedOrderBlocks.map((ob) => ob.timeframe))).join(' + ');
-
-    const headerEmoji = (isTier3 ? '🔥🔥🔥 ' : '🔥🔥 ') + (isSell ? '🔴🔴' : '🟢🟢');
-    const headerTitle = isTier3
-      ? isSell
-        ? `[TIER 3 - VIP] HỢP LƯU BÁN NWE H1 + SUPPLY OB (${tfSummary}) + NẾN RÚT RÂU M15!`
-        : `[TIER 3 - VIP] HỢP LƯU MUA NWE H1 + DEMAND OB (${tfSummary}) + NẾN RÚT RÂU M15!`
-      : isSell
-      ? `[TIER 2 - MTF] HỢP LƯU BÁN CHÉO KHUNG: NWE H1 + SUPPLY OB (${tfSummary})!`
-      : `[TIER 2 - MTF] HỢP LƯU MUA CHÉO KHUNG: NWE H1 + DEMAND OB (${tfSummary})!`;
+    const tfSummary = Array.from(new Set(payload.matchedOrderBlocks.map((ob) => ob.timeframe))).join('+');
+    const shortSym = (payload.displaySymbol || 'XAU/USD').split(' (')[0].trim() || 'XAU/USD';
 
     const primaryOb = payload.primaryOb;
     const slBuffer = Number((0.5 * payload.atrM15).toFixed(2));
     const suggestedSl = isSell
       ? Number((primaryOb.top + slBuffer).toFixed(2))
       : Number((primaryOb.bottom - slBuffer).toFixed(2));
-    const tp1 = payload.nweH1.kernel;
+
+    const entryPrice = payload.confluenceLevel;
+    const slDist = Math.abs(entryPrice - suggestedSl);
+    const kernelPrice = payload.nweH1.kernel;
+    const kernelProfit = isSell ? entryPrice - kernelPrice : kernelPrice - entryPrice;
+    const rr2Price = isSell
+      ? Number((entryPrice - 2 * slDist).toFixed(2))
+      : Number((entryPrice + 2 * slDist).toFixed(2));
+    const rr15Price = isSell
+      ? Number((entryPrice - 1.5 * slDist).toFixed(2))
+      : Number((entryPrice + 1.5 * slDist).toFixed(2));
+
+    // Sắp xếp TP1 (gần hơn) -> TP2 (xa hơn) để không bị ngược TP1 > TP2 khi NWE H1 Kernel xa hơn 2R
+    let tp1Price: number;
+    let tp1Label: string;
+    let tp2Price: number;
+    let tp2Label: string;
+
+    if (kernelProfit > 0 && kernelProfit < 2 * slDist) {
+      tp1Price = kernelPrice;
+      tp1Label = 'NWE H1 Kernel';
+      tp2Price = rr2Price;
+      tp2Label = 'R:R 1:2';
+    } else if (kernelProfit >= 2 * slDist) {
+      tp1Price = rr15Price;
+      tp1Label = 'R:R 1:1.5';
+      tp2Price = kernelPrice;
+      tp2Label = 'NWE H1 Kernel';
+    } else {
+      tp1Price = rr15Price;
+      tp1Label = 'R:R 1:1.5';
+      tp2Price = rr2Price;
+      tp2Label = 'R:R 1:2';
+    }
+
+    const tp1Diff = isSell ? entryPrice - tp1Price : tp1Price - entryPrice;
+    const tp1Sign = tp1Diff >= 0 ? '+' : '-';
+    const tp1RR = slDist > 0 ? (Math.abs(tp1Diff) / slDist).toFixed(1) : '0.0';
+
+    const tp2Diff = isSell ? entryPrice - tp2Price : tp2Price - entryPrice;
+    const tp2Sign = tp2Diff >= 0 ? '+' : '-';
+    const tp2RR = slDist > 0 ? (Math.abs(tp2Diff) / slDist).toFixed(1) : '0.0';
+
+    const mktDiff = payload.currentPrice - entryPrice;
+    const mktSign = mktDiff >= 0 ? '+' : '-';
+
+    const dirDot = isSell ? '🔴🔴' : '🟢🟢';
+    const dirAction = isSell ? 'SELL' : 'BUY';
+    const tierBadge = isTier3 ? '🔥🔥🔥 <b>SMC TIER 3 VIP</b>' : '🔥🔥 <b>SMC TIER 2 MTF</b>';
 
     let obLines = '';
     payload.matchedOrderBlocks.forEach((ob) => {
       const icon = ob.type === 'SUPPLY' ? '🔴' : '🟢';
-      const primaryTag = ob.id === primaryOb.id ? ' ⭐ <i>[Khối chính]</i>' : '';
-      obLines += `  • ${icon} <b>${ob.label}:</b> <code>$${ob.bottom.toFixed(2)} - $${ob.top.toFixed(2)}</code>${primaryTag}\n`;
+      const star = ob.id === primaryOb.id ? ' ⭐' : '';
+      obLines += `• ${icon} <b>${ob.timeframe}${star}:</b> <code>${ob.bottom.toFixed(2)}</code> – <code>${ob.top.toFixed(2)}</code>\n`;
     });
 
-    let conditionBlock = '';
-    if (isTier3) {
-      conditionBlock = isSell
-        ? `🔴 <b>ĐÃ XÁC NHẬN ĐỦ 3 LỚP HỢP LƯU TIER 3 (VIP):</b>\n` +
-          `  1️⃣ <b>Dải trên NWE H1:</b> Chạm/vượt mốc <code>$${payload.nweH1.upperBand.toFixed(2)}</code> (Quá Mua H1)\n` +
-          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Giá tiến vào vùng Supply OB chính <code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>\n` +
-          `  3️⃣ <b>Nến rút râu từ chối M15:</b> Rút râu trên mạnh trong vùng hợp lưu (không phá vỡ mép trên OB <code>$${primaryOb.top.toFixed(2)}</code>, lọc chuẩn theo ATR M15 = <code>${payload.atrM15.toFixed(2)}</code>)`
-        : `🟢 <b>ĐÃ XÁC NHẬN ĐỦ 3 LỚP HỢP LƯU TIER 3 (VIP):</b>\n` +
-          `  1️⃣ <b>Dải dưới NWE H1:</b> Chạm/thủng mốc <code>$${payload.nweH1.lowerBand.toFixed(2)}</code> (Quá Bán H1)\n` +
-          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Giá rơi vào vùng Demand OB chính <code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>\n` +
-          `  3️⃣ <b>Nến rút râu từ chối M15:</b> Rút chân dưới mạnh trong vùng hợp lưu (không phá vỡ mép dưới OB <code>$${primaryOb.bottom.toFixed(2)}</code>, lọc chuẩn theo ATR M15 = <code>${payload.atrM15.toFixed(2)}</code>)`;
-    } else {
-      conditionBlock = isSell
-        ? `🔴 <b>KHỚP HỢP LƯU CHÉO KHUNG TIER 2 (MTF):</b>\n` +
-          `  1️⃣ <b>Dải trên NWE H1:</b> Giá chạm/vượt biên trên NWE khung H1 (<code>$${payload.nweH1.upperBand.toFixed(2)}</code>)\n` +
-          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Đồng thời giao cắt vùng Supply OB chưa triệt tiêu (<code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>)`
-        : `🟢 <b>KHỚP HỢP LƯU CHÉO KHUNG TIER 2 (MTF):</b>\n` +
-          `  1️⃣ <b>Dải dưới NWE H1:</b> Giá chạm/thủng biên dưới NWE khung H1 (<code>$${payload.nweH1.lowerBand.toFixed(2)}</code>)\n` +
-          `  2️⃣ <b>Order Block đa khung (${tfSummary}):</b> Đồng thời giao cắt vùng Demand OB chưa triệt tiêu (<code>$${primaryOb.bottom.toFixed(2)} - $${primaryOb.top.toFixed(2)}</code>)`;
-    }
+    const nweEdge = isSell ? payload.nweH1.upperBand : payload.nweH1.lowerBand;
 
-    const adviceText = isTier3
-      ? '💡 <b>Khuyến nghị chiến lược [TIER 3 - VIP SMC + NWE]:</b>\n' +
-        `• Hợp lưu đa khung NWE H1 + OB (${tfSummary}) ĐỒNG THỜI đã có nến M15 rút râu xác nhận từ chối giá quyết liệt.\n` +
-        `• Ưu tiên mở vị thế <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> với Stop Loss đặt ngoài mép khối OB chính (<code>$${suggestedSl.toFixed(2)}</code>).`
-      : '💡 <b>Khuyến nghị chiến lược [TIER 2 - HỢP LƯU ĐA KHUNG]:</b>\n' +
-        `• Giá đang hội tụ tại 2 lớp cản mạnh (NWE H1 + OB ${tfSummary}).\n` +
-        `• Thích hợp canh mở vị thế <b>${isSell ? 'SELL / SHORT' : 'BUY / LONG'}</b> hoặc chờ nến M15 rút râu xác nhận nâng cấp lên <b>TIER 3 VIP</b>!`;
+    const tp1Suffix = tp1Label.startsWith('R:R') ? tp1Label : `${tp1Label} · 1:${tp1RR}`;
+    const tp2Suffix = tp2Label.startsWith('R:R') ? tp2Label : `${tp2Label} · 1:${tp2RR}`;
 
-    let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
+    let msg = `${dirDot} <b>${dirAction} ${shortSym}</b> • ${tierBadge}\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `💎 <b>Tài sản:</b> <code>${payload.displaySymbol}</code>\n`;
-    msg += `⏳ <b>Hợp lưu khung:</b> <b>NWE H1 + OB (${tfSummary})</b>${isTier3 ? ' + <b>Nến M15</b>' : ''}\n`;
-    msg += `💵 <b>Giá thị trường hiện tại:</b> <code>$${payload.currentPrice.toFixed(2)}</code>\n\n`;
+    msg += `🎯 <b>ENTRY:</b> <code>${entryPrice.toFixed(2)}</code> <i>(NWE H1 + OB ${primaryOb.timeframe})</i>\n`;
+    msg += `🛑 <b>SL:</b> <code>${suggestedSl.toFixed(2)}</code> <b>(-${slDist.toFixed(2)})</b> <i>· Ngoài OB + 0.5 ATR</i>\n`;
+    msg += `✅ <b>TP1:</b> <code>${tp1Price.toFixed(2)}</code> <i>(${tp1Sign}${Math.abs(tp1Diff).toFixed(2)} · ${tp1Suffix})</i>\n`;
+    msg += `✅ <b>TP2:</b> <code>${tp2Price.toFixed(2)}</code> <i>(${tp2Sign}${Math.abs(tp2Diff).toFixed(2)} · ${tp2Suffix})</i>\n`;
+    msg += `💵 <b>Giá MKT:</b> <code>${payload.currentPrice.toFixed(2)}</code> <i>(${mktSign}${Math.abs(mktDiff).toFixed(2)} vs Entry)</i>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
 
-    msg += `⚡ <b>Hiện tượng khớp điều kiện:</b>\n`;
-    msg += `${conditionBlock}\n\n`;
-
-    msg += `📦 <b>CÁC KHỐI ORDER BLOCK ĐANG GIAO CẮT (${payload.matchedOrderBlocks.length}):</b>\n`;
-    msg += `${obLines}\n`;
-
-    msg += `🎯 <b>KẾ HOẠCH THAM KHẢO (VÙNG HỢP LƯU):</b>\n`;
-    msg += `• 🎯 <b>Mép vùng hợp lưu (${isSell ? 'SELL' : 'BUY'}):</b> <code>$${payload.confluenceLevel.toFixed(2)}</code>\n`;
-    msg += `• 🛑 <b>Gợi ý Cắt Lỗ (SL ngoài OB + 0.5 ATR M15):</b> <code>$${suggestedSl.toFixed(2)}</code>\n`;
-    msg += `• 🎯 <b>Mục tiêu TP1 (NWE H1 Kernel):</b> <code>$${tp1.toFixed(2)}</code>\n\n`;
-
-    msg += `📊 <b>THÔNG SỐ KỸ THUẬT:</b>\n`;
-    msg += `• NWE H1 Upper: <code>$${payload.nweH1.upperBand.toFixed(2)}</code> | Kernel: <code>$${payload.nweH1.kernel.toFixed(2)}</code> | Lower: <code>$${payload.nweH1.lowerBand.toFixed(2)}</code>\n`;
-    msg += `• ATR(14) M15: <code>${payload.atrM15.toFixed(2)}</code>\n`;
-    msg += `⏱ <b>Thời gian phát hiện:</b> <code>${nowStr}</code>\n\n`;
-
-    msg += `${adviceText}`;
+    msg += `📌 <b>Hợp lưu:</b> NWE H1 (<code>${nweEdge.toFixed(2)}</code>) + OB <b>${tfSummary}</b>${isTier3 ? ' + <b>Rút râu M15</b>' : ''}\n`;
+    msg += `🧱 <b>Khối OB (${payload.matchedOrderBlocks.length}):</b>\n${obLines}`;
+    msg += `📐 <b>ATR M15:</b> <code>${payload.atrM15.toFixed(2)}</code> · 🕒 <code>${nowStr}</code>`;
 
     return msg;
   }
@@ -1833,76 +2109,43 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
     }).format(new Date());
 
-    let headerEmoji = '🔔';
-    let headerTitle = 'CẢNH BÁO KỸ THUẬT: KHỚP VÙNG QUAN TRỌNG!';
-    let adviceText = '';
+    const shortSym = (analysis.displaySymbol || 'XAU/USD').split(' (')[0].trim() || 'XAU/USD';
+    const isSell =
+      analysis.signal === 'CONFLUENCE_SELL' ||
+      analysis.signal === 'TOUCH_SUPPLY_OB' ||
+      analysis.signal === 'TOUCH_NWE_UPPER';
+    const isConfluence =
+      analysis.signal === 'CONFLUENCE_SELL' || analysis.signal === 'CONFLUENCE_BUY';
 
-    if (analysis.signal === 'CONFLUENCE_SELL') {
-      headerEmoji = '🚨🔴🔴';
-      headerTitle = 'HỢP LƯU BÁN CỰC MẠNH: DẢI TRÊN NWE + VÙNG CUNG (SUPPLY OB)!';
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược:</b>\n' +
-        '• Giá chạm đồng thời 2 lớp cản: Biên trên Nadaraya-Watson Envelope và khối Bearish Order Block.\n' +
-        '• Áp lực bán chặn chiều tăng cực lớn. Thích hợp mở vị thế <b>SELL / SHORT</b> hoặc chốt lời vị thế BUY!';
-    } else if (analysis.signal === 'CONFLUENCE_BUY') {
-      headerEmoji = '🚨🟢🟢';
-      headerTitle = 'HỢP LƯU MUA CỰC MẠNH: DẢI DƯỚI NWE + VÙNG CẦU (DEMAND OB)!';
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược:</b>\n' +
-        '• Giá chạm đồng thời 2 lớp đỡ: Biên dưới Nadaraya-Watson Envelope và khối Bullish Order Block.\n' +
-        '• Lực cầu bắt đáy nhập cuộc mạnh. Thích hợp mở vị thế <b>BUY / LONG</b> bắt sóng hồi phục!';
-    } else if (analysis.signal === 'TOUCH_SUPPLY_OB') {
-      headerEmoji = '🧱🔴';
-      headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CUNG (SUPPLY ZONE / BEARISH ORDER BLOCK)!';
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược:</b>\n' +
-        '• Giá đã tiến vào vùng tồn đọng lệnh bán của cá mập (Bearish OB). Canh phản ứng từ chối giá (rút râu nến) để vào lệnh <b>SELL</b>.';
-    } else if (analysis.signal === 'TOUCH_DEMAND_OB') {
-      headerEmoji = '🧱🟢';
-      headerTitle = 'GIÁ ĐÃ CHẠM VÙNG CẦU (DEMAND ZONE / BULLISH ORDER BLOCK)!';
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược:</b>\n' +
-        '• Giá đã rơi vào vùng thanh khoản mua của tổ chức (Bullish OB). Canh phản ứng đảo chiều rút chân để vào lệnh <b>BUY</b>.';
-    } else if (analysis.signal === 'TOUCH_NWE_UPPER') {
-      headerEmoji = '🌊🔴';
-      headerTitle = 'GIÁ CHẠM DẢI TRÊN NADARAYA-WATSON ENVELOPE (QUÁ MUA)!';
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược:</b>\n' +
-        '• Biên độ giá bung vượt khỏi dải biên trên NWE (Quá Mua kỹ thuật). Xác suất điều chỉnh ngắn hạn rất cao.';
-    } else if (analysis.signal === 'TOUCH_NWE_LOWER') {
-      headerEmoji = '🌊🟢';
-      headerTitle = 'GIÁ CHẠM DẢI DƯỚI NADARAYA-WATSON ENVELOPE (QUÁ BÁN)!';
-      adviceText =
-        '💡 <b>Khuyến nghị chiến lược:</b>\n' +
-        '• Biên độ giá xuyên thủng dải biên dưới NWE (Quá Bán kỹ thuật). Thích hợp quan sát nhịp hồi phục kỹ thuật.';
-    }
+    const dirAction = isSell ? 'SELL' : 'BUY';
+    const dirDot = isConfluence ? (isSell ? '🚨🔴🔴' : '🚨🟢🟢') : isSell ? '🔴' : '🟢';
 
-    let msg = `${headerEmoji} <b>${headerTitle}</b>\n`;
+    let badge = `SMC/NWE (${analysis.timeframe})`;
+    if (isConfluence) badge = `HỢP LƯU NWE + OB (${analysis.timeframe})`;
+    else if (analysis.signal === 'TOUCH_SUPPLY_OB') badge = `SUPPLY OB (${analysis.timeframe})`;
+    else if (analysis.signal === 'TOUCH_DEMAND_OB') badge = `DEMAND OB (${analysis.timeframe})`;
+    else if (analysis.signal === 'TOUCH_NWE_UPPER') badge = `NWE UPPER (${analysis.timeframe})`;
+    else if (analysis.signal === 'TOUCH_NWE_LOWER') badge = `NWE LOWER (${analysis.timeframe})`;
+
+    const activeOb = isSell ? analysis.touchingSupply : analysis.touchingDemand;
+    const nweEdge = isSell ? analysis.nwe.upperBand : analysis.nwe.lowerBand;
+    const tpKernel = analysis.nwe.kernel;
+
+    let msg = `${dirDot} <b>CANH ${dirAction} ${shortSym}</b> • <b>${badge}</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
-    msg += `💎 <b>Tài sản:</b> <code>${analysis.displaySymbol}</code>\n`;
-    msg += `⏳ <b>Khung thời gian:</b> <b>${this.timeframeLabels[analysis.timeframe] || analysis.timeframe}</b>\n`;
-    msg += `💵 <b>Giá thị trường hiện tại:</b> <code>$${analysis.currentPrice.toFixed(2)}</code>\n\n`;
-
-    msg += `⚡ <b>Hiện tượng phát hiện:</b>\n`;
-    msg += `• ${analysis.signalReason}\n\n`;
-
-    msg += `📊 <b>THÔNG SỐ VÙNG KỸ THUẬT:</b>\n`;
-    msg += `• NWE Upper: <code>$${analysis.nwe.upperBand.toFixed(2)}</code> | Lower: <code>$${analysis.nwe.lowerBand.toFixed(2)}</code>\n`;
-    msg += `• Kháng cự động: <code>$${analysis.nwe.dynamicResistance.toFixed(2)}</code> | Hỗ trợ động: <code>$${analysis.nwe.dynamicSupport.toFixed(2)}</code>\n`;
-    if (analysis.touchingSupply) {
-      msg += `• 🔴 Biên độ Vùng Cung: <code>$${analysis.touchingSupply.bottom.toFixed(2)} - $${analysis.touchingSupply.top.toFixed(2)}</code>\n`;
+    msg += `💵 <b>Giá MKT:</b> <code>${analysis.currentPrice.toFixed(2)}</code>\n`;
+    if (activeOb) {
+      msg += `🧱 <b>Vùng OB:</b> <code>${activeOb.bottom.toFixed(2)}</code> – <code>${activeOb.top.toFixed(2)}</code>\n`;
+      const obEdgeSl = isSell ? activeOb.top : activeOb.bottom;
+      msg += `🛑 <b>Mép ngoài OB (SL ref):</b> <code>${obEdgeSl.toFixed(2)}</code>\n`;
     }
-    if (analysis.touchingDemand) {
-      msg += `• 🟢 Biên độ Vùng Cầu: <code>$${analysis.touchingDemand.bottom.toFixed(2)} - $${analysis.touchingDemand.top.toFixed(2)}</code>\n`;
-    }
-    msg += `⏱ <b>Thời gian:</b> <code>${nowStr}</code>\n\n`;
-
-    msg += `${adviceText}`;
+    msg += `🌊 <b>Biên NWE ${isSell ? 'Upper' : 'Lower'}:</b> <code>${nweEdge.toFixed(2)}</code>\n`;
+    msg += `✅ <b>TP1 (Kernel):</b> <code>${tpKernel.toFixed(2)}</code>\n`;
+    msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `📌 ${analysis.signalReason}\n`;
+    msg += `🕒 <code>${nowStr}</code>`;
 
     return msg;
   }
