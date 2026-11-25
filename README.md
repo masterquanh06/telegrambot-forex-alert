@@ -1,117 +1,78 @@
-# 🤖 Telegram Forex & Financial Alert Bot
+# Telegram Forex & Financial Alert Bot
 
-Bot Telegram phân tích kỹ thuật thời gian thực và cảnh báo giao dịch chuyên biệt cho **Vàng (`XAU/USD`)**, **Crypto (`BTC`, `ETH`, `SOL`, ...)** và **Tin tức Kinh tế Vĩ mô**, xây dựng trên nền tảng **NestJS + TypeScript + Prisma (PostgreSQL) + Telegraf**.
-
-Hệ thống sở hữu **Pure Signal Engines** độc lập (dễ kiểm thử & backtest), phân cấp cảnh báo rõ ràng theo **Tier System** cho cả 2 chiến lược cốt lõi **BB+ATR (M5)** và **SMC+NWE Chéo Khung (H1 + OB đa khung + M15)**.
+Hệ thống phân tích kỹ thuật thời gian thực và cảnh báo giao dịch qua Telegram cho Vàng (`XAU/USD`), Crypto (`BTC`, `ETH`, `SOL`, ...) và lịch kinh tế vĩ mô. Dự án được xây dựng trên nền tảng NestJS, TypeScript, Prisma (PostgreSQL) và Telegraf với các signal engine thuần (pure functions) tách biệt khỏi lớp I/O.
 
 ---
 
-## 🚀 Các tính năng & Chiến lược cốt lõi
+## Chiến lược & Hệ thống phân cấp tín hiệu
 
-### 1. 🎯 Chiến lược Bollinger Bands (20) + ATR (14) + RSI (14) — Khung M5
-* **Nguồn giá thời gian thực:** Kết nối trực tiếp **TradingView Live WebSocket (`OANDA:XAUUSD`, 0ms latency)** kèm fallback TradingView Scanner và Binance REST.
-* **Hệ thống phân cấp 5 mức (Pure Engine `src/indicator/signal-classifier.ts`):**
-  * 🔔 **Tier 0:** Chạm dải `BB Upper` / `BB Lower` thông thường.
-  * 🔥 **Tier 1:** Khớp vùng Entry mở rộng `BB Upper + ATR(14)` / `BB Lower - ATR(14)`.
-  * 🔥🔥 **Tier 2A:** Khớp `BB ± ATR` **+** `RSI(14)` cực trị (`>= 70` / `<= 30`).
-  * 🔥🔥 **Tier 2B:** Xuất hiện **nến rút râu từ chối M5** (Pinbar ≥ 45% hoặc nến đảo chiều thuận màu ≥ 25%) ngay tại biên `BB Upper` / `BB Lower`.
-  * 🔥🔥🔥 **Tier 3 (VIP):** Khớp `BB ± ATR` **+** **nến rút râu từ chối M5** ngay tại mốc `BB ± ATR`.
-* **Chống rút râu ảo & Quản trị rủi ro:** Chỉ kích hoạt bộ lọc râu từ **phút thứ 4 trở đi (≥ 80% thời gian nến M5)** hoặc trên nến vừa đóng (`prevCandle`), tự động tính Entry, SL (`= 1 ATR`), TP1 (`BB Middle`), TP2 (`1:2 R:R`) và hỗ trợ lọc Daily Trend Bias (`BUY_ONLY`, `SELL_ONLY`, `BOTH`).
+### 1. Bollinger Bands (20) + ATR (14) + RSI (14) — Khung M5 (`OANDA:XAUUSD`)
 
-### 2. 🌊 SMC Order Blocks + Nadaraya-Watson Envelope (NWE) — Hợp lưu Chéo Khung (MTF)
-* **Nguồn dữ liệu chuẩn TradingView:** Kết nối 1 WebSocket đa khung trực tiếp `TVC:GOLD` (500 nến/khung cho `M5, M15, M30, H1, H4, D1`, 0ms latency) với công thức NWE khớp chính xác Pine Script v5 (`h=8, mult=3.0`, repainting 500 bars), kèm fallback Binance.
-* **Hệ thống 3 tầng đồng bộ (Pure Engine `src/smc/smc-mtf-classifier.ts`):**
-  * 🔔 **Tier 1:** Chạm NWE đơn lẻ hoặc OB đơn lẻ trên từng khung.
-  * 🔥🔥 **Tier 2 (MTF Confluence):** Chạm biên **NWE H1** **ĐỒNG THỜI** giao cắt ≥ 1 khối **Order Block** từ các khung **`M15`, `M30`, `H1`, `H4`** (ưu tiên khối chính `H4 > H1 > M30 > M15`, tự động chống trùng với hợp lưu đơn khung H1).
-  * 🔥🔥🔥 **Tier 3 (VIP):** Thỏa Tier 2 **+** xuất hiện **nến rút râu từ chối khung M15** (`detectZoneRejectionWick` lọc theo **`ATR(14)` M15** — hỗ trợ bắt râu ngay trong lòng OB rộng miễn không phá vỡ mép ngoài `ob.top`/`ob.bottom`, chống rút râu ảo ≥ phút thứ 12 của nến M15).
+- **Nguồn dữ liệu:** Luồng TradingView Live WebSocket theo từng tick, kèm fallback TradingView Scanner và Binance REST.
+- **Phân cấp 5 mức (`Tier 0` → `Tier 3`):**
+  - `Tier 0`: Giá chạm biên `BB Upper` hoặc `BB Lower`.
+  - `Tier 1`: Giá khớp vùng entry mở rộng `BB Upper + ATR(14)` hoặc `BB Lower - ATR(14)`.
+  - `Tier 2A`: Khớp `BB ± ATR` kết hợp `RSI(14)` quá mua/quá bán (`>= 70` / `<= 30`).
+  - `Tier 2B`: Xuất hiện nến rút râu từ chối M5 (Pinbar `>= 45%` hoặc nến đảo chiều thuận màu `>= 25%`) tại biên BB.
+  - `Tier 3 (VIP)`: Khớp `BB ± ATR` kết hợp nến rút râu từ chối M5 ngay tại mốc `BB ± ATR`.
+- **Kiểm soát nhiễu & Quản trị rủi ro:** Bộ lọc râu chỉ kích hoạt từ phút thứ 4 của nến M5 (`>= 80%` thời lượng nến) hoặc trên nến vừa đóng (`prevCandle`); tự động tính Entry, SL (`1 ATR`), TP1 (`BB Middle`), TP2 (`R:R 1:2`) và hỗ trợ lọc Daily Trend Bias (`BUY_ONLY`, `SELL_ONLY`, `BOTH`).
 
-### 2B. 👑💎🔥🔥🔥 TIER SSS — Siêu Hợp Lưu Tối Thượng & 📞 Gọi Điện Báo Thức (CallMeBot)
-* Tự động kích hoạt qua `SuperTierService` (`src/common/super-tier.service.ts` + pure engine `src/indicator/super-tier-classifier.ts`) khi **cả `BB+ATR M5 (Tier 3)` và `SMC+NWE M15 (Tier 3)` cùng xuất hiện 1 chiều trong cửa sổ 20 phút**.
-* Hợp nhất kế hoạch vào lệnh: **SL an toàn nhất** (`max` cho SELL / `min` cho BUY giữa 2 hệ thống), **TP1 (`BB Middle M5`)**, **TP2 (`NWE H1 Kernel`)**, kèm khóa chống trùng theo cặp nến và cooldown 15 phút cùng chiều.
-* **Gọi điện báo thức Telegram qua CallMeBot (`src/common/callmebot.service.ts`):** Tự động đổ chuông và đọc tiếng Việt trực tiếp trên Telegram **CHỈ cho 2 trường hợp VIP nhất: `TIER SSS` và `SMC+NWE Tier 3`** (tự chống gọi đúp khi SMC Tier 3 nâng cấp thành TIER SSS). Hỗ trợ test nhanh bất cứ lúc nào bằng lệnh `/testcall` — xem hướng dẫn cài đặt từng bước tại **[CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md)**.
+### 2. SMC Order Blocks + Nadaraya-Watson Envelope (MTF — `TVC:GOLD`)
 
-### 3. 🔔 Cảnh báo Giá, 🟡 RSI Vàng Đa Khung & 📰 Kinh tế Vĩ mô
-* **Price Alert (`/alert`):** Cảnh báo chạm mốc giá mục tiêu tức thì cho Vàng và Crypto (Cron 12s).
-* **RSI Vàng 7 khung (`/gold`, `/goldalert`):** Theo dõi `RSI(14)` từ `M1` đến `D1` với các ngưỡng tùy chỉnh `70/30`, `75/25`, `80/20` (Cron 25s).
-* **Lịch Kinh tế ForexFactory (`/calendar`, `/settings`):** Cơ chế **Adaptive Fast Polling** (4 giây/lần vào giờ ra tin CPI, PPI, NFP, FOMC; 30 giây/lần ngoài giờ tin).
+- **Nguồn dữ liệu:** Kết nối WebSocket đa khung trực tiếp `TVC:GOLD` (500 nến/khung cho `M5`, `M15`, `M30`, `H1`, `H4`, `D1`), công thức NWE chuẩn Pine Script v5 (`h=8, mult=3.0`) kèm fallback Binance.
+- **Phân cấp 3 tầng:**
+  - `Tier 1`: Chạm biên NWE hoặc vùng Supply/Demand Order Block trên từng khung đơn lẻ.
+  - `Tier 2 (MTF Confluence)`: Chạm biên NWE `H1` đồng thời giao cắt ít nhất một Order Block thuộc `M15`, `M30`, `H1`, `H4` (ưu tiên khối chính `H4 > H1 > M30 > M15`).
+  - `Tier 3 (VIP)`: Thỏa `Tier 2` kết hợp nến rút râu từ chối `M15` được lọc nhiễu theo `ATR(14)` khung M15 và quy tắc `>= 80%` thời lượng nến.
 
-### 4. 📈 Tích hợp MetaTrader 5 EA & Webhook
-* Endpoint `POST /api/webhook/bbatr` nhận tín hiệu tức thì từ bộ EA trong thư mục `mt5/` (`BB_ATR_Live_Alert.mq5` và `BB_ATR_AutoTrader.mq5`).
+### 3. Tier SSS (Siêu hợp lưu) & CallMeBot Voice Alert
 
-### 5. 🛡️ An toàn vận hành
-* **Chống Race Condition:** Mutex lock cho các vòng quét BB+ATR (WebSocket vs Cron 3s) và SMC/NWE (Cron 15s).
-* **Chống bắn trùng nến rút râu:** Khóa theo `(rejectionCandleTime, alertTier)` — cho phép nâng cấp Tier trên cùng cây nến nhưng không lặp lại khi sang nến mới.
-* **Broadcast Telegram song song:** Gửi theo batch **25 users/lượt** với `Promise.allSettled()` và log rõ từng `chatId` lỗi.
+- **Điều kiện kích hoạt:** Tự động kích hoạt khi `BB+ATR M5 (Tier 3)` và `SMC+NWE M15 (Tier 3)` cùng xuất hiện theo một chiều trong cửa sổ 20 phút.
+- **Hợp nhất kế hoạch lệnh:** Chọn SL an toàn hơn giữa hai hệ thống (`max` cho SELL, `min` cho BUY), `TP1 = BB Middle (M5)`, `TP2 = NWE H1 Kernel`, kèm cơ chế chống trùng theo cặp nến và cooldown 15 phút cùng chiều.
+- **CallMeBot:** Tự động gọi điện báo thức bằng giọng nói tiếng Việt trên Telegram cho `TIER SSS` và `SMC Tier 3` (tự chống gọi đúp khi SMC Tier 3 nâng cấp lên `TIER SSS`).
 
 ---
 
-## 📋 Bảng câu lệnh nhanh
+## Tính năng bổ trợ
+
+- **Cảnh báo giá (`/alert`):** Theo dõi chạm mốc giá cho Vàng và Crypto (chu kỳ 12s).
+- **RSI Vàng đa khung (`/gold`, `/goldalert`):** Theo dõi `RSI(14)` trên 7 khung (`M1`–`D1`) với các ngưỡng `70/30`, `75/25`, `80/20` (chu kỳ 25s).
+- **Lịch kinh tế vĩ mô (`/calendar`, `/settings`):** Lấy dữ liệu ForexFactory theo cơ chế Adaptive Fast Polling (4s trong khung giờ ra tin CPI/PPI/NFP/FOMC, 30s ngoài giờ tin).
+- **MT5 EA Webhook:** Endpoint `POST /api/webhook/bbatr` tiếp nhận tín hiệu trực tiếp từ Expert Advisor trong `mt5/`.
+
+---
+
+## Kiến trúc vận hành & Khả năng chịu lỗi
+
+- **WebSocket Resilience:** Watchdog kiểm tra mỗi 5s, gửi ping mỗi 15s, ngắt kết nối treo sau 35s không có dữ liệu và phát hiện clock-jump (`> 30s`); reconnect theo exponential backoff kèm jitter (`1s`–`30s`) và tự động đồng bộ nến + quét tín hiệu ngay sau khi nhận `timescale_update` đầu tiên.
+- **Độ trễ thấp (Low-Latency Pipeline):** Cache danh sách subscriber trong RAM (đồng bộ tức thì khi người dùng đổi cấu hình), gửi Telegram trước rồi ghi log DB bất đồng bộ (`send-first, log-later`), kích hoạt quét SMC MTF theo sự kiện WebSocket (throttle 1s leading+trailing) kết hợp memoization cho `detectOrderBlocks` và gửi batch 25 người dùng/lượt với bộ đếm chính xác số tin gửi thành công.
+- **Database Resilience:** `PrismaService` tự động thử lại tối đa 5 lần với cơ chế khóa chống reconnect song song (`$disconnect()` / `$connect()`) khi gặp lỗi `P1017`, `P1001`, `P1008`, `P2024`; mặc định tắt keep-alive (`DB_KEEPALIVE_INTERVAL_MS=0`) để tối ưu cho PostgreSQL serverless.
+
+---
+
+## Bảng lệnh Telegram
 
 | Nhóm | Lệnh | Chức năng |
 | :--- | :--- | :--- |
-| **BB + ATR (M5)** | `/bbatr` (hoặc `/bb`) | Bảng đo kỹ thuật M5, Entry/SL/TP, Bias ngày & trạng thái Tier |
-| | `/bbatr on` / `/bbatr off` | Bật / Tắt cảnh báo tự động XAU/USD M5 |
-| | `/bbatr buy` / `sell` / `both` | Lọc hướng giao dịch trong ngày (Daily Bias) |
-| | `/bbatr btc` / `/bbatr alert btc` | Xem bảng đo hoặc đặt cảnh báo BB+ATR cho mã khác |
-| **NWE Envelope** | `/nwe` (hoặc `/envelope`) | Mở Dashboard NWE (`M5–D1`), bật/tắt từng khung |
+| **BB + ATR (M5)** | `/bbatr`, `/bb` | Xem bảng đo kỹ thuật M5, Entry/SL/TP, Bias và trạng thái Tier |
+| | `/bbatr on`, `/bbatr off` | Bật / Tắt cảnh báo tự động XAU/USD M5 |
+| | `/bbatr buy`, `sell`, `both` | Lọc hướng giao dịch trong ngày (Daily Bias) |
+| | `/bbatr btc`, `/bbatr alert btc` | Xem bảng đo hoặc đặt cảnh báo BB+ATR cho mã khác |
+| **NWE Envelope** | `/nwe`, `/envelope` | Mở bảng điều khiển NWE (`M5–D1`) và bật/tắt từng khung |
 | | `/nwe h1`, `/nwe on`, `/nwe off` | Xem nhanh khung H1 hoặc bật/tắt cảnh báo NWE |
-| **Order Blocks (SMC)** | `/ob` (hoặc `/smc`, `/orderblock`) | Mở Dashboard Supply/Demand OB (`M5–D1`), bật/tắt từng khung |
+| **Order Blocks (SMC)** | `/ob`, `/smc`, `/orderblock` | Mở bảng điều khiển Supply/Demand OB (`M5–D1`) |
 | | `/ob m15`, `/ob on`, `/ob off` | Xem nhanh OB khung M15 hoặc bật/tắt cảnh báo OB |
-| **Tier 3 (VIP)** | `/tier3` (hoặc `/tier2`, `/sweep`) | Bật / Tắt riêng cảnh báo Tier 3 VIP (Rút râu M5 & M15) |
-| **Gọi báo thức** | `/testcall` (hoặc `/testcall smc`) | Test gọi điện báo thức Telegram qua CallMeBot |
-| **Cảnh báo Giá** | `/alert <mã> <giá>` / `/alerts` | Đặt & quản lý cảnh báo chạm giá (VD: `/alert xau 3650`) |
-| **RSI Vàng** | `/gold` / `/goldalert` | Xem bảng RSI 7 khung & cài đặt ngưỡng cảnh báo |
-| **Kinh tế Vĩ mô** | `/calendar` / `/settings` | Xem lịch ForexFactory hôm nay & chọn mức độ tin (Cao/TB/Thấp) |
-| **Trợ giúp** | `/start` / `/help` | Xem tổng quan hướng dẫn sử dụng bot |
+| **Tier 3 (VIP)** | `/tier3`, `/tier2`, `/sweep` | Bật / Tắt riêng cảnh báo Tier 3 VIP |
+| **Gọi báo thức** | `/testcall`, `/testcall smc` | Kiểm tra kết nối gọi điện báo thức qua CallMeBot |
+| **Cảnh báo giá** | `/alert <mã> <giá>`, `/alerts` | Tạo và quản lý cảnh báo chạm giá |
+| **RSI Vàng** | `/gold`, `/goldalert` | Xem bảng RSI 7 khung và cấu hình ngưỡng |
+| **Kinh tế vĩ mô** | `/calendar`, `/settings` | Xem lịch ForexFactory hôm nay và chọn mức độ tin |
+| **Trợ giúp** | `/start`, `/help` | Xem hướng dẫn sử dụng |
 
 ---
 
-## 🏗️ Cấu trúc mã nguồn chính
+## Tài liệu tham khảo
 
-```text
-src/
-├── indicator/
-│   ├── signal-classifier.ts          # Pure Engine BB+ATR (Tier 0/1/2A/2B/3) + detectM5RejectionWick + detectZoneRejectionWick
-│   ├── bb-atr.service.ts             # TradingView WS, TV Scanner, Binance, Mutex, Batch Broadcast
-│   └── bb-atr-webhook.controller.ts  # POST /api/webhook/bbatr (MT5 EA)
-├── smc/
-│   ├── smc-mtf-classifier.ts         # Pure Engine SMC+NWE Cross-TF (NWE H1 + OB M15/M30/H1/H4 + Rút râu M15)
-│   └── smc.service.ts                # Quét đơn khung & MTF, chống trùng H1, Batch Broadcast
-├── services/liquiditySweep.ts        # Module phân tích Liquidity Sweep (unit-tested)
-├── gold/                             # Theo dõi & cảnh báo RSI Vàng 7 khung
-├── alert/                            # Cảnh báo giá chạm tức thì (XAU & Crypto)
-├── macro/                            # Lịch kinh tế vĩ mô ForexFactory (Adaptive Fast Polling)
-├── cron/                             # Bộ lập lịch background intervals
-└── telegram/                         # Telegraf commands, inline keyboards & dashboards
-mt5/                                  # Expert Advisors (BB_ATR_Live_Alert.mq5, BB_ATR_AutoTrader.mq5)
-prisma/schema.prisma                  # PostgreSQL schema (TelegramUser, BbAtrAlertLog, SmcAlertLog, ...)
-test/                                 # Unit tests (bbTierAlert, smcMtfTier, liquiditySweep)
-```
-
----
-
-## 🛠️ Cài đặt, Build & Kiểm thử
-
-```bash
-# 1. Cài dependencies & generate Prisma client
-npm install
-npm run prisma:generate
-
-# 2. Đồng bộ schema lên PostgreSQL
-npm run prisma:push
-
-# 3. Build TypeScript & chạy toàn bộ unit tests (36/36 tests)
-npm run build
-npm test
-
-# 4. Khởi chạy bot
-npm run start:dev   # Development
-npm run start:prod  # Production
-```
-
----
-
-## 📚 Tài liệu chi tiết
-* 📞 **Hướng dẫn cài đặt & xử lý lỗi gọi điện báo thức Telegram (CallMeBot):** 👉 **[CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md)**
-* 🔥 **Giải thích toàn bộ các Tier ở mọi chiến lược & công thức lọc râu:** 👉 **[TIER_SYSTEM.md](TIER_SYSTEM.md)**
-* 📖 **Danh sách đầy đủ câu lệnh, nút bấm & hướng dẫn sử dụng:** 👉 **[COMMANDS.md](COMMANDS.md)**
+- [TIER_SYSTEM.md](TIER_SYSTEM.md) — Đặc tả chi tiết các Tier và công thức lọc râu.
+- [COMMANDS.md](COMMANDS.md) — Danh sách đầy đủ câu lệnh và hướng dẫn thao tác.
+- [CALLMEBOT_SETUP.md](CALLMEBOT_SETUP.md) — Hướng dẫn cấu hình gọi điện báo thức qua CallMeBot.
