@@ -6,7 +6,7 @@ Hệ thống phân tích kỹ thuật thời gian thực và cảnh báo giao d�
 
 ## Chiến lược & Hệ thống phân cấp tín hiệu
 
-### 1. Bollinger Bands (20) + ATR (14) + RSI (14) — Khung M5 (`OANDA:XAUUSD`)
+### 1. Bollinger Bands (20) + ATR (14) + RSI (14) — Khung M5 
 
 - **Nguồn dữ liệu:** Luồng TradingView Live WebSocket theo từng tick, kèm fallback TradingView Scanner và Binance REST.
 - **Phân cấp 5 mức (`Tier 0` → `Tier 3`):**
@@ -17,7 +17,7 @@ Hệ thống phân tích kỹ thuật thời gian thực và cảnh báo giao d�
   - `Tier 3 (VIP)`: Khớp `BB ± ATR` kết hợp nến rút râu từ chối M5 ngay tại mốc `BB ± ATR`.
 - **Kiểm soát nhiễu & Quản trị rủi ro:** Bộ lọc râu chỉ kích hoạt từ phút thứ 4 của nến M5 (`>= 80%` thời lượng nến) hoặc trên nến vừa đóng (`prevCandle`); tự động tính Entry, SL (`1 ATR`), TP1 (`BB Middle`), TP2 (`R:R 1:2`) và hỗ trợ lọc Daily Trend Bias (`BUY_ONLY`, `SELL_ONLY`, `BOTH`).
 
-### 2. SMC Order Blocks + Nadaraya-Watson Envelope (MTF — `TVC:GOLD`)
+### 2. SMC Order Blocks + Nadaraya-Watson Envelope 
 
 - **Nguồn dữ liệu:** Kết nối WebSocket đa khung trực tiếp `TVC:GOLD` (500 nến/khung cho `M5`, `M15`, `M30`, `H1`, `H4`, `D1`), công thức NWE chuẩn Pine Script v5 (`h=8, mult=3.0`) kèm fallback Binance.
 - **Phân cấp 3 tầng:**
