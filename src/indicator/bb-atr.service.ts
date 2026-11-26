@@ -119,6 +119,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   private lastGlobalAlertTime = 0;
   private lastGlobalAlertPrice = 0;
   private lastAlertTier = 0;
+  private lastAlertTierLabel = '';
   private scanTickCount = 0;
 
   // Mutex/lock chống Race Condition giữa TradingView WebSocket callback và Cron 3s
@@ -1654,6 +1655,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
           this.consecutiveTouchCount = 0;
           this.lastCandleAlertLevel = 'NORMAL';
           this.lastAlertTier = 0;
+          this.lastAlertTierLabel = '';
         }
         return false;
       }
@@ -1678,6 +1680,26 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
       const isCooldownPassed = now - this.lastGlobalAlertTime > 90 * 1000;
 
       if (isNewCandle || isUpgradeSignal || isCooldownPassed) {
+        const prevTier = this.lastAlertTier || 0;
+        const prevTierLabel = this.lastAlertTierLabel;
+        const prevWasSell =
+          this.lastGlobalSignal === 'SELL_CONFLUENCE' ||
+          this.lastGlobalSignal === 'ENTRY_SELL' ||
+          this.lastGlobalSignal === 'TOUCH_UPPER_BB' ||
+          (this.lastGlobalSignal as any) === 'SELL';
+        const prevWasBuy =
+          this.lastGlobalSignal === 'BUY_CONFLUENCE' ||
+          this.lastGlobalSignal === 'ENTRY_BUY' ||
+          this.lastGlobalSignal === 'TOUCH_LOWER_BB' ||
+          (this.lastGlobalSignal as any) === 'BUY';
+        const isSameSide = (isSellSide && prevWasSell) || (isBuySide && prevWasBuy);
+
+        if (isSameSide && prevTierLabel && (state.alertTier || 0) > prevTier) {
+          state.upgradedFromTier = prevTierLabel;
+        } else {
+          state.upgradedFromTier = undefined;
+        }
+
         if (isNewCandle) {
           if (this.lastGlobalSignal === state.signal) {
             this.consecutiveTouchCount++;
@@ -1693,6 +1715,7 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         this.lastGlobalAlertTime = now;
         this.lastGlobalAlertPrice = state.currentPrice;
         this.lastAlertTier = state.alertTier || 0;
+        this.lastAlertTierLabel = this.getBbTierLabel(state.alertTier || 0, state.tierReason);
 
         // Cập nhật trạng thái chống trùng cho nến rút râu (áp dụng cho cả >= 80% thời gian nến lẫn prevCandle)
         if (
@@ -2416,6 +2439,14 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   /**
    * Format tin nhắn cảnh báo tối ưu tốc độ vào lệnh (< 2 giây đọc, 1 chạm copy giá dán MT5)
    */
+  private getBbTierLabel(tier: number, tierReason?: string): string {
+    if (tier === 3) return 'Tier 3 VIP';
+    if (tier === 2 && tierReason === 'TIER_2B_M5_WICK') return 'Tier 2B';
+    if (tier === 2) return 'Tier 2A';
+    if (tier === 1) return 'Tier 1';
+    return 'Tier 0';
+  }
+
   renderAlertMessage(state: BbAtrState, signalType: BbAtrSignalType): string {
     const isSell =
       signalType === 'ENTRY_SELL' ||
@@ -2508,6 +2539,10 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
     let msg = `${headerLine}\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    if (state.upgradedFromTier) {
+      const currentTierLabel = this.getBbTierLabel(tier, state.tierReason);
+      msg += `⬆️ <b>Tiến hóa:</b> ${state.upgradedFromTier} ➔ <b>${currentTierLabel}</b>\n`;
+    }
     if (state.consecutiveTouches && state.consecutiveTouches > 1) {
       msg += `⚠️ <b>Nến chạm liên tiếp #${state.consecutiveTouches}</b>\n`;
     }

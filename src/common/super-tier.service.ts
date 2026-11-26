@@ -292,6 +292,7 @@ export class SuperTierService {
 
     let msg = `👑💎🔥🔥🔥 ${dirEmoji} <b>${dirAction} XAU/USD • TIER SSS</b>\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    msg += `⬆️ <b>Tiến hóa:</b> Tier 3 (BB + SMC) ➔ <b>TIER SSS</b>\n`;
     msg += `🎯 <b>ENTRY:</b> <code>${result.entryPrice.toFixed(2)}</code> <i>(Hợp lưu BB M5 + SMC M15)</i>\n`;
     msg += `🛑 <b>SL AN TOÀN:</b> <code>${result.safestSl.toFixed(2)}</code> <b>(-${slDistance.toFixed(2)})</b> <i>· Hợp nhất 2 hệ thống</i>\n`;
     if (result.tp1Price !== undefined) {

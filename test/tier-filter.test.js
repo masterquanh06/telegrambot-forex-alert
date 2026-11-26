@@ -165,4 +165,66 @@ test('Granular Tier Settings & Subscriber Filtering (Tier 0, 1, 2, 3, SSS)', asy
     assert.ok(sentTo.includes('u_sss_on_t3_off'), 'User bật Tier SSS (dù tắt Tier 3) phải nhận Tier SSS');
     assert.ok(!sentTo.includes('u_sss_off_t3_on'), 'User tắt Tier SSS (dù bật Tier 3) không được nhận Tier SSS');
   });
+
+  await t.test('4. UI Tiến hóa Tier: hiển thị rõ tiến hóa từ Tier nào lên Tier nào trên BB+ATR và SMC MTF', () => {
+    const { BbAtrService } = require('../dist/indicator/bb-atr.service');
+    const { SmcService } = require('../dist/smc/smc.service');
+
+    const bb = new BbAtrService({}, {});
+    const baseState = {
+      symbol: 'XAU',
+      displaySymbol: 'XAU/USD',
+      assetType: 'GOLD',
+      timeframe: 'M5',
+      currentPrice: 3625,
+      bbUpper: 3615,
+      bbMiddle: 3600,
+      bbLower: 3585,
+      atrValue: 10,
+      rsiValue: 74,
+      upperEntry: 3625,
+      lowerEntry: 3575,
+      sellSl: 3635,
+      buySl: 3565,
+      slDistance: 10,
+      distToUpper: 0,
+      distToUpperPercent: 0,
+      distToLower: 40,
+      distToLowerPercent: 1,
+      signal: 'SELL_CONFLUENCE',
+      signalReason: 'Test',
+      alertTier: 3,
+      tierReason: 'TIER_3_M5_WICK',
+      upgradedFromTier: 'Tier 2A',
+      updatedAt: new Date(),
+    };
+    const bbMsg = bb.renderAlertMessage(baseState, 'SELL_CONFLUENCE');
+    assert.ok(bbMsg.includes('⬆️ <b>Tiến hóa:</b> Tier 2A ➔ <b>Tier 3 VIP</b>'));
+
+    const bbFreshMsg = bb.renderAlertMessage({ ...baseState, upgradedFromTier: undefined }, 'SELL_CONFLUENCE');
+    assert.ok(!bbFreshMsg.includes('Tiến hóa:'));
+
+    const smc = new SmcService({}, {});
+    const smcMsg = smc.renderMtfAlertMessage({
+      symbol: 'XAU',
+      displaySymbol: 'XAU/USD',
+      currentPrice: 3620,
+      nweH1: { kernel: 3580, upperBand: 3622, lowerBand: 3540, mae: 10, dynamicResistance: 3625, dynamicSupport: 3535, isTouchUpper: true, isTouchLower: false },
+      matchedOrderBlocks: [{ id: 'ob1', index: 1, time: 1, top: 3628, bottom: 3618, type: 'SUPPLY', label: 'Supply H1', timeframe: 'H1', mitigated: false }],
+      primaryOb: { id: 'ob1', index: 1, time: 1, top: 3628, bottom: 3618, type: 'SUPPLY', label: 'Supply H1', timeframe: 'H1', mitigated: false },
+      confluenceLevel: 3622,
+      atrM15: 12,
+      signal: 'CONFLUENCE_SELL',
+      direction: 'SELL',
+      alertTier: 3,
+      tierReason: 'SMC_TIER_3_MTF_WICK',
+      upgradedFromTier: 'Tier 2 MTF',
+      signalReason: 'Test',
+      updatedAt: new Date(),
+    });
+    assert.ok(smcMsg.includes('⬆️ <b>Tiến hóa:</b> Tier 2 MTF ➔ <b>Tier 3 VIP</b>'));
+
+    bb.stopTradingViewLiveStream();
+    smc.stopTradingViewMultiTfStream();
+  });
 });

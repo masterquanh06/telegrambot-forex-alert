@@ -1549,6 +1549,15 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       const isCooldownPassed = now - this.lastMtfAlertTime > 150 * 1000;
 
       if (isUpgradeTier || isNewWickConfirmation || isNewCandle || isNewSignal || isCooldownPassed) {
+        const prevMtfTier = this.lastMtfTier;
+        const prevMtfSignal = this.lastMtfSignal;
+        const upgradedFromTier =
+          prevMtfTier > 0 && result.alertTier > prevMtfTier && prevMtfSignal === result.signal
+            ? prevMtfTier === 2
+              ? 'Tier 2 MTF'
+              : `Tier ${prevMtfTier}`
+            : undefined;
+
         this.lastMtfSignal = result.signal;
         this.lastMtfTier = result.alertTier as 2 | 3;
         this.lastMtfAlertTime = now;
@@ -1575,6 +1584,7 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
           direction: result.direction,
           alertTier: result.alertTier as 2 | 3,
           tierReason: result.tierReason,
+          upgradedFromTier,
           signalReason: result.signalReason,
           rejectionCandleTime: result.rejectionCandleTime,
           updatedAt: new Date(),
@@ -2147,6 +2157,10 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
 
     let msg = `${dirDot} <b>${dirAction} ${shortSym}</b> • ${tierBadge}\n`;
     msg += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    if (payload.upgradedFromTier) {
+      const currentTierLabel = isTier3 ? 'Tier 3 VIP' : 'Tier 2 MTF';
+      msg += `⬆️ <b>Tiến hóa:</b> ${payload.upgradedFromTier} ➔ <b>${currentTierLabel}</b>\n`;
+    }
     msg += `🎯 <b>ENTRY:</b> <code>${entryPrice.toFixed(2)}</code> <i>(NWE H1 + OB ${primaryOb.timeframe})</i>\n`;
     msg += `🛑 <b>SL:</b> <code>${suggestedSl.toFixed(2)}</code> <b>(-${slDist.toFixed(2)})</b> <i>· Ngoài OB + 0.5 ATR</i>\n`;
     msg += `✅ <b>TP1:</b> <code>${tp1Price.toFixed(2)}</code> <i>(${tp1Sign}${Math.abs(tp1Diff).toFixed(2)} · ${tp1Suffix})</i>\n`;

@@ -73,6 +73,7 @@ export interface SmcMtfAlertPayload {
   direction: 'SELL' | 'BUY';
   alertTier: 2 | 3;
   tierReason: SmcMtfTierReason;
+  upgradedFromTier?: string; // Ghi rõ tiến hóa từ Tier nào (VD: "Tier 2 MTF")
   signalReason: string;
   rejectionCandleTime?: number;
   updatedAt: Date;

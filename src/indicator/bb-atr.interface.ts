@@ -85,6 +85,7 @@ export interface BbAtrState {
   sweepSignal?: SweepSignal;
   alertTier?: 0 | 1 | 2 | 3;
   tierReason?: TierReason;
+  upgradedFromTier?: string; // Ghi rõ tiến hóa từ Tier nào (VD: "Tier 0", "Tier 1", "Tier 2A", "Tier 2B")
   rejectionCandleTime?: number;
   updatedAt: Date;
 }
