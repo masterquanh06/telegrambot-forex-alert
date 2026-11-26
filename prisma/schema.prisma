@@ -18,6 +18,10 @@ model TelegramUser {
   xauOversoldRsi     Float    @default(30)
   bbAtrAlertEnabled   Boolean  @default(true)
   bbTier0AlertEnabled Boolean  @default(true)
+  tier1AlertEnabled   Boolean  @default(true)
+  tier2SignalEnabled  Boolean  @default(true)
+  tier3AlertEnabled   Boolean  @default(true)
+  tierSssAlertEnabled Boolean  @default(true)
   bbAtrBias           String   @default("BOTH") // "BOTH", "BUY_ONLY", "SELL_ONLY"
   nweAlertEnabled    Boolean  @default(true)
   nweTimeframes      String[] @default(["M5", "M15", "H1", "H4"])

@@ -20,7 +20,7 @@ import {
   SMC_MTF_OB_TIMEFRAMES,
 } from './smc-mtf-classifier';
 import { SuperTierService } from '../common/super-tier.service';
-import { SubscriberCacheService } from '../common/subscriber-cache.service';
+import { SubscriberCacheService, isTierEnabledForSubscriber } from '../common/subscriber-cache.service';
 import { createLeadingTrailingThrottle } from '../common/throttle';
 import { CallMeBotService } from '../common/callmebot.service';
 
@@ -280,14 +280,16 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
     this.scheduleTvWsReconnect();
   }
 
-  /** Đồng bộ ngay cài đặt NWE/SMC/Tier2 của user vào SubscriberCache (RAM) */
+  /** Đồng bộ ngay cài đặt NWE/SMC/Tier của user vào SubscriberCache (RAM) */
   private syncSubscriberCache(chatId: string, s: UserSmcSettings) {
+    const tier3On = s.tier3AlertEnabled !== undefined ? s.tier3AlertEnabled : s.tier2AlertEnabled !== false;
     this.subscriberCache?.patch(chatId, {
       nweAlertEnabled: s.nweAlertEnabled,
       nweTimeframes: [...(s.nweTimeframes || s.timeframes || [])],
       smcAlertEnabled: s.smcAlertEnabled,
       smcTimeframes: [...(s.smcTimeframes || s.timeframes || [])],
-      tier2AlertEnabled: s.tier2AlertEnabled !== false,
+      tier2AlertEnabled: tier3On,
+      tier3AlertEnabled: tier3On,
     });
   }
 
@@ -1064,7 +1066,9 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
    */
   async toggleTier2(chatId: string): Promise<UserSmcSettings> {
     const current = await this.getUserSettings(chatId);
-    current.tier2AlertEnabled = current.tier2AlertEnabled === false ? true : false;
+    const nextVal = current.tier2AlertEnabled === false ? true : false;
+    current.tier2AlertEnabled = nextVal;
+    current.tier3AlertEnabled = nextVal;
     this.userSettingsFallback.set(chatId, current);
     this.syncSubscriberCache(chatId, current);
 
@@ -1072,20 +1076,30 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.update({
           where: { chatId },
-          data: { tier2AlertEnabled: current.tier2AlertEnabled },
+          data: { tier2AlertEnabled: nextVal, tier3AlertEnabled: nextVal },
         }),
       );
-    } catch (e) {}
+    } catch (e) {
+      try {
+        await this.prisma.executeWithRetry(() =>
+          this.prisma.telegramUser.update({
+            where: { chatId },
+            data: { tier2AlertEnabled: nextVal },
+          }),
+        );
+      } catch (fallbackErr) {}
+    }
 
     return current;
   }
 
   /**
-   * Đặt trực tiếp trạng thái Bật/Tắt Cảnh báo Tier 2
+   * Đặt trực tiếp trạng thái Bật/Tắt Cảnh báo Tier 3 VIP
    */
   async setTier2(chatId: string, enabled: boolean): Promise<UserSmcSettings> {
     const current = await this.getUserSettings(chatId);
     current.tier2AlertEnabled = enabled;
+    current.tier3AlertEnabled = enabled;
     this.userSettingsFallback.set(chatId, current);
     this.syncSubscriberCache(chatId, current);
 
@@ -1093,10 +1107,19 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
       await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.update({
           where: { chatId },
-          data: { tier2AlertEnabled: enabled },
+          data: { tier2AlertEnabled: enabled, tier3AlertEnabled: enabled },
         }),
       );
-    } catch (e) {}
+    } catch (e) {
+      try {
+        await this.prisma.executeWithRetry(() =>
+          this.prisma.telegramUser.update({
+            where: { chatId },
+            data: { tier2AlertEnabled: enabled },
+          }),
+        );
+      } catch (fallbackErr) {}
+    }
 
     return current;
   }
@@ -1311,36 +1334,65 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
   async getAllSubscribers(): Promise<{ chatId: string; settings: UserSmcSettings }[]> {
     const result: { chatId: string; settings: UserSmcSettings }[] = [];
 
-    // Nạp từ database
+    // Nạp từ cache hoặc database
     try {
-      const users: any[] = this.subscriberCache?.isReady()
-        ? this.subscriberCache.getAll()
-        : await this.prisma.executeWithRetry(() =>
-        this.prisma.telegramUser.findMany({
-          select: {
-            chatId: true,
-            nweAlertEnabled: true,
-            nweTimeframes: true,
-            smcAlertEnabled: true,
-            smcTimeframes: true,
-            tier2AlertEnabled: true,
-          },
-        }),
-      );
+      const fromCache = Boolean(this.subscriberCache?.isReady());
+      let users: any[];
+      if (fromCache) {
+        users = this.subscriberCache!.getAll();
+      } else {
+        try {
+          users = await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: {
+                chatId: true,
+                nweAlertEnabled: true,
+                nweTimeframes: true,
+                smcAlertEnabled: true,
+                smcTimeframes: true,
+                tier1AlertEnabled: true,
+                tier2SignalEnabled: true,
+                tier3AlertEnabled: true,
+                tier2AlertEnabled: true,
+              },
+            }),
+          );
+        } catch (colErr) {
+          users = await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: {
+                chatId: true,
+                nweAlertEnabled: true,
+                nweTimeframes: true,
+                smcAlertEnabled: true,
+                smcTimeframes: true,
+                tier2AlertEnabled: true,
+              },
+            }),
+          );
+        }
+      }
 
       const knownDbChatIds = new Set(users.map((u) => u.chatId));
 
       for (const u of users) {
-        const fb = this.userSettingsFallback.get(u.chatId);
+        const fb = !fromCache ? this.userSettingsFallback.get(u.chatId) : undefined;
         const nweTfs = (u.nweTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'];
         const smcTfs = (u.smcTimeframes as SmcTimeframe[]) || ['M5', 'M15', 'H1', 'H4'];
+        const tier3Enabled =
+          fb?.tier2AlertEnabled !== undefined
+            ? fb.tier2AlertEnabled
+            : isTierEnabledForSubscriber(u, '3');
         const settings: UserSmcSettings = {
           nweAlertEnabled: fb !== undefined ? fb.nweAlertEnabled : (u.nweAlertEnabled ?? true),
           nweTimeframes: fb?.nweTimeframes || nweTfs,
           smcAlertEnabled: fb !== undefined ? fb.smcAlertEnabled : (u.smcAlertEnabled ?? true),
           smcTimeframes: fb?.smcTimeframes || smcTfs,
           timeframes: fb?.smcTimeframes || smcTfs,
-          tier2AlertEnabled: fb?.tier2AlertEnabled !== undefined ? fb.tier2AlertEnabled : (u.tier2AlertEnabled ?? true),
+          tier1AlertEnabled: isTierEnabledForSubscriber(u, '1'),
+          tier2SignalEnabled: isTierEnabledForSubscriber(u, '2'),
+          tier3AlertEnabled: tier3Enabled,
+          tier2AlertEnabled: tier3Enabled,
         };
         result.push({ chatId: u.chatId, settings });
       }
@@ -1535,10 +1587,13 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
         const eligibleChatIds = subscribers
           .filter((sub) => {
             if (isTier3) {
-              // TIER 3 (VIP): gửi cho mọi user không chủ động tắt Tier VIP
-              return sub.settings.tier2AlertEnabled !== false;
+              // TIER 3 (VIP): gửi cho mọi user không chủ động tắt riêng Tier 3
+              return isTierEnabledForSubscriber(sub.settings, '3');
             }
-            // TIER 2 (MTF Confluence): gửi cho user đang bật NWE H1 hoặc OB thuộc các khung bị chạm
+            // TIER 2 (MTF Confluence): bắt buộc bật Tier 2 + bật NWE H1 hoặc OB thuộc khung bị chạm
+            if (!isTierEnabledForSubscriber(sub.settings, '2')) {
+              return false;
+            }
             const nweTfs = sub.settings.nweTimeframes || sub.settings.timeframes;
             const obTfs = sub.settings.smcTimeframes || sub.settings.timeframes;
             const matchNweH1 = sub.settings.nweAlertEnabled && nweTfs.includes('H1');
@@ -1633,7 +1688,9 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
               }
 
               // Nếu chưa đạt TIER SSS -> gọi điện CallMeBot cho SMC/NWE Tier 3
-              if (!sssTriggered && this.callMeBotService) {
+              // Bỏ gọi điện khi chỉ chạm OB M15 (vẫn giữ nguyên alert Tier 3 & báo SuperTierService)
+              const hasHigherTfOb = Array.from(matchedObTfs).some((tf) => tf !== 'M15');
+              if (!sssTriggered && hasHigherTfOb && this.callMeBotService) {
                 const tfList = Array.from(matchedObTfs).join(' ');
                 this.callMeBotService
                   .triggerVoiceCall({
@@ -1742,6 +1799,10 @@ export class SmcService implements OnModuleInit, OnModuleDestroy {
 
             const eligibleChatIds = subscribers
               .filter((sub) => {
+                // Quét đơn khung là Tier 1: lọc độc lập theo cờ Tier 1
+                if (!isTierEnabledForSubscriber(sub.settings, '1')) {
+                  return false;
+                }
                 const nweActive =
                   sub.settings.nweAlertEnabled &&
                   (sub.settings.nweTimeframes || sub.settings.timeframes).includes(tf);

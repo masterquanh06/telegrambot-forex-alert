@@ -1,6 +1,6 @@
 import { Injectable, Logger, Inject, Optional, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
-import { SubscriberCacheService } from './subscriber-cache.service';
+import { SubscriberCacheService, isTierEnabledForSubscriber } from './subscriber-cache.service';
 import { TelegramService } from '../telegram/telegram.service';
 import { CallMeBotService } from './callmebot.service';
 import {
@@ -157,25 +157,36 @@ export class SuperTierService {
   }
 
   /**
-   * Lấy toàn bộ người dùng VIP (tier2AlertEnabled !== false), fallback activeChatIds nếu DB lỗi
+   * Lấy toàn bộ người dùng đang bật TIER SSS (tách biệt với Tier 3; fallback tier2AlertEnabled nếu record cũ)
    */
   private async getAllVipSubscribers(): Promise<string[]> {
     const chatIds: string[] = [];
     const knownDbChatIds = new Set<string>();
 
     try {
-      const users: any[] = this.subscriberCache?.isReady()
-        ? this.subscriberCache.getAll()
-        : await this.prisma.executeWithRetry(() =>
+      let users: any[];
+      if (this.subscriberCache?.isReady()) {
+        users = this.subscriberCache.getAll();
+      } else {
+        try {
+          users = await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: { chatId: true, tierSssAlertEnabled: true, tier2AlertEnabled: true },
+            }),
+          );
+        } catch (colErr) {
+          users = await this.prisma.executeWithRetry(() =>
             this.prisma.telegramUser.findMany({
               select: { chatId: true, tier2AlertEnabled: true },
             }),
           );
+        }
+      }
 
       if (users && users.length > 0) {
         for (const u of users) {
           knownDbChatIds.add(u.chatId);
-          if (u.tier2AlertEnabled !== false) {
+          if (isTierEnabledForSubscriber(u, 'SSS')) {
             chatIds.push(u.chatId);
           }
         }

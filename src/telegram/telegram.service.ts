@@ -8,6 +8,7 @@ import { AlertService } from '../alert/alert.service';
 import { BbAtrService } from '../indicator/bb-atr.service';
 import { SmcService } from '../smc/smc.service';
 import { CallMeBotService } from '../common/callmebot.service';
+import { SubscriberCacheService, AlertTierKey, TierAlertSettings } from '../common/subscriber-cache.service';
 import { UserXauSettings, XauTimeframe } from '../gold/gold.interface';
 import { UserSmcSettings, SmcTimeframe } from '../smc/smc.interface';
 
@@ -30,6 +31,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
     @Optional()
     @Inject(forwardRef(() => CallMeBotService))
     private readonly callMeBotService?: CallMeBotService,
+    @Optional()
+    private readonly subscriberCache?: SubscriberCacheService,
   ) {
     const token = this.configService.get<string>('TELEGRAM_BOT_TOKEN');
     if (!token) {
@@ -111,7 +114,8 @@ export class TelegramService implements OnModuleInit, OnModuleDestroy {
 
 📋 <b>DANH SÁCH CÁC LỆNH TÍNH NĂNG:</b>
 👑 <b>TIER SSS (Siêu Hợp Lưu):</b> Tự động kích hoạt khi <b>BB+ATR M5 (Tier 3)</b> và <b>SMC/NWE M15 (Tier 3)</b> cùng chiều trong cửa sổ 20 phút!
-🔥 <code>/tier3</code> (hoặc <code>/tier2</code>, <code>/sweep</code>) - Bật/Tắt riêng Cảnh báo VIP Tier 3 &amp; Tier SSS
+🔥 <code>/tiers</code> (hoặc <code>/tier</code>) - Bật/Tắt chi tiết thông báo từng Tier (Tier 0, 1, 2, 3, Tier SSS)
+🔥 <code>/tier3</code> (hoặc <code>/tier2</code>, <code>/sweep</code>) - Bật/Tắt nhanh Cảnh báo VIP Tier 3
 📞 <code>/testcall</code> (hoặc <code>/calltest</code>) - Test gọi điện báo thức Telegram qua CallMeBot (<code>/testcall</code> hoặc <code>/testcall smc</code>)
 🌊 <code>/nwe</code> (hoặc <code>/envelope</code>) - Bảng Dashboard Nadaraya-Watson Envelope (NWE + Cản động)
 🧱 <code>/ob</code> (hoặc <code>/smc</code>, <code>/orderblock</code>) - Bảng Dashboard SMC Order Blocks (Vùng Cung/Cầu)
@@ -989,6 +993,83 @@ Gõ lệnh theo cú pháp:
       }
     });
 
+    // 10A. Lệnh /tiers (hoặc /tier, /tiersettings) - Menu bật/tắt thông báo độc lập theo từng Tier
+    this.bot.command(['tiers', 'tier', 'tiersettings', 'caidattier'], async (ctx) => {
+      const chatId = ctx.chat.id.toString();
+      const username = ctx.from?.username || ctx.from?.first_name;
+      await this.watchlistService.registerUser(chatId, username);
+      const { text, keyboard } = await this.renderTierSettingsView(chatId);
+      await ctx.replyWithHTML(text, keyboard);
+    });
+
+    // Action: Mở menu Cài đặt Tier từ các Dashboard
+    this.bot.action('tier_settings_menu', async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      await ctx.answerCbQuery('⚙️ Mở cài đặt theo từng Tier...');
+      const { text, keyboard } = await this.renderTierSettingsView(chatId);
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(text, keyboard);
+      }
+    });
+
+    // Action: Toggle độc lập từng Tier (0, 1, 2, 3, SSS) -> lưu DB + patch RAM cache ngay lập tức
+    this.bot.action(/^tier_toggle:(0|1|2|3|sss)$/i, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const rawKey = ctx.match[1].toUpperCase();
+      const tierKey = rawKey as AlertTierKey;
+
+      let enabled = true;
+      if (this.subscriberCache) {
+        const res = await this.subscriberCache.toggleTier(chatId, tierKey);
+        enabled = res.enabled;
+      } else if (tierKey === '0') {
+        enabled = await this.bbAtrService.toggleUserTier0Enabled(chatId);
+      } else if (tierKey === '3') {
+        enabled = await this.bbAtrService.toggleUserTier2Enabled(chatId);
+      }
+
+      const tierNames: Record<AlertTierKey, string> = {
+        '0': '🔔 Tier 0',
+        '1': '🔥 Tier 1',
+        '2': '🔥🔥 Tier 2',
+        '3': '🔥🔥🔥 Tier 3',
+        SSS: '👑 Tier SSS',
+      };
+      await ctx.answerCbQuery(`${tierNames[tierKey]}: ${enabled ? '✅ ĐÃ BẬT' : '❌ ĐÃ TẮT'}`);
+
+      const { text, keyboard } = await this.renderTierSettingsView(chatId);
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(text, keyboard);
+      }
+    });
+
+    // Action: Áp nhanh preset bật tất cả hoặc chỉ VIP (Tier 3 + SSS)
+    this.bot.action(/^tier_preset:(all|vip)$/i, async (ctx) => {
+      const chatId = ctx.chat?.id.toString();
+      if (!chatId) return;
+      const preset = ctx.match[1].toLowerCase() === 'all' ? 'ALL' : 'VIP_ONLY';
+      if (this.subscriberCache) {
+        await this.subscriberCache.applyTierPreset(chatId, preset);
+      }
+      await ctx.answerCbQuery(
+        preset === 'ALL'
+          ? '✅ Đã BẬT thông báo tất cả các Tier!'
+          : '👑 Đã chuyển sang chế độ chỉ nhận VIP (Tier 3 + Tier SSS)!',
+      );
+      const { text, keyboard } = await this.renderTierSettingsView(chatId);
+      try {
+        await ctx.editMessageText(text, { parse_mode: 'HTML', ...keyboard });
+      } catch (e) {
+        await ctx.replyWithHTML(text, keyboard);
+      }
+    });
+
     // 10. Lệnh /tier2 hoặc /tier3 hoặc /sweep - Bật/Tắt riêng Cảnh báo Quét Thanh Khoản VIP (High Probability)
     this.bot.command(['tier2', 'tier3', 'sweep', 'sfp'], async (ctx) => {
       const chatId = ctx.chat.id.toString();
@@ -1741,6 +1822,9 @@ ${summaryTag}
           isTier2On ? '🔥 Tier 3 (Rút Râu M15): ✅ BẬT' : '🔥 Tier 3 (Rút Râu M15): ❌ TẮT',
           `nwe_toggle_tier2:${validTf}`,
         ),
+        Markup.button.callback('⚙️ Cài đặt Tier', 'tier_settings_menu'),
+      ],
+      [
         Markup.button.callback('ℹ️ Hướng Dẫn NWE', 'nwe_help'),
       ],
     ]);
@@ -1803,6 +1887,9 @@ ${summaryTag}
           isTier2On ? '🔥 Tier 3 (Rút Râu M15): ✅ BẬT' : '🔥 Tier 3 (Rút Râu M15): ❌ TẮT',
           `ob_toggle_tier2:${validTf}`,
         ),
+        Markup.button.callback('⚙️ Cài đặt Tier', 'tier_settings_menu'),
+      ],
+      [
         Markup.button.callback('ℹ️ Hướng Dẫn OB', 'ob_help'),
       ],
     ]);
@@ -2020,7 +2107,60 @@ ${summaryTag}
         ),
       ],
       [
+        Markup.button.callback('⚙️ Cài đặt Tier', 'tier_settings_menu'),
         Markup.button.callback('ℹ️ Hướng Dẫn & Tier System', 'bbatr_help'),
+      ],
+    ]);
+
+    return { text, keyboard };
+  }
+
+  /**
+   * Tạo giao diện Menu cài đặt bật/tắt thông báo độc lập theo từng Tier (0, 1, 2, 3, SSS)
+   */
+  private async renderTierSettingsView(chatId: string): Promise<{ text: string; keyboard: any }> {
+    const settings: TierAlertSettings = this.subscriberCache
+      ? await this.subscriberCache.getTierSettings(chatId)
+      : {
+          tier0: await this.bbAtrService.getUserTier0Enabled(chatId),
+          tier1: true,
+          tier2: true,
+          tier3: await this.bbAtrService.getUserTier2Enabled(chatId),
+          tierSss: await this.bbAtrService.getUserTier2Enabled(chatId),
+        };
+
+    const statusBadge = (on: boolean) => (on ? '✅ BẬT' : '❌ TẮT');
+
+    let text = `⚙️ <b>CÀI ĐẶT THÔNG BÁO THEO TỪNG TIER</b>\n`;
+    text += `━━━━━━━━━━━━━━━━━━━━━\n`;
+    text += `<i>Bật hoặc tắt độc lập từng cấp độ tín hiệu. Thay đổi có hiệu lực ngay lập tức:</i>\n\n`;
+    text += `• 🔔 <b>Tier 0</b> (Tín hiệu cơ sở): ${statusBadge(settings.tier0)}\n`;
+    text += `• 🔥 <b>Tier 1</b> (Tín hiệu tiêu chuẩn): ${statusBadge(settings.tier1)}\n`;
+    text += `• 🔥🔥 <b>Tier 2</b> (Hợp lưu nâng cao): ${statusBadge(settings.tier2)}\n`;
+    text += `• 🔥🔥🔥 <b>Tier 3</b> (Xác nhận VIP): ${statusBadge(settings.tier3)}\n`;
+    text += `• 👑 <b>Tier SSS</b> (Siêu hợp lưu): ${statusBadge(settings.tierSss)}\n\n`;
+    text += `💡 <i>Tắt Tier thấp hơn không ảnh hưởng các Tier cao hơn (ví dụ tắt Tier 1 vẫn nhận đủ Tier 2, Tier 3 và Tier SSS).</i>`;
+
+    const keyboard = Markup.inlineKeyboard([
+      [
+        Markup.button.callback(`🔔 Tier 0: ${statusBadge(settings.tier0)}`, 'tier_toggle:0'),
+        Markup.button.callback(`🔥 Tier 1: ${statusBadge(settings.tier1)}`, 'tier_toggle:1'),
+      ],
+      [
+        Markup.button.callback(`🔥🔥 Tier 2: ${statusBadge(settings.tier2)}`, 'tier_toggle:2'),
+        Markup.button.callback(`🔥🔥🔥 Tier 3: ${statusBadge(settings.tier3)}`, 'tier_toggle:3'),
+      ],
+      [
+        Markup.button.callback(`👑 Tier SSS: ${statusBadge(settings.tierSss)}`, 'tier_toggle:sss'),
+      ],
+      [
+        Markup.button.callback('✅ Bật tất cả Tier', 'tier_preset:all'),
+        Markup.button.callback('👑 Chỉ VIP (Tier 3 + SSS)', 'tier_preset:vip'),
+      ],
+      [
+        Markup.button.callback('📊 Về BB+ATR', 'bbatr_menu'),
+        Markup.button.callback('🌊 Về NWE', 'nwe_menu'),
+        Markup.button.callback('🧱 Về OB', 'ob_menu'),
       ],
     ]);
 

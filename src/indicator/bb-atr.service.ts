@@ -20,7 +20,7 @@ import {
   M5_DURATION_MS,
 } from './signal-classifier';
 import { SuperTierService } from '../common/super-tier.service';
-import { SubscriberCacheService } from '../common/subscriber-cache.service';
+import { SubscriberCacheService, isTierEnabledForSubscriber } from '../common/subscriber-cache.service';
 
 @Injectable()
 export class BbAtrService implements OnModuleInit, OnModuleDestroy {
@@ -1219,17 +1219,27 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
    */
   async setUserTier2Enabled(chatId: string, enabled: boolean): Promise<boolean> {
     this.userTier2Fallback.set(chatId, enabled);
-    this.subscriberCache?.patch(chatId, { tier2AlertEnabled: enabled });
+    this.subscriberCache?.patch(chatId, { tier2AlertEnabled: enabled, tier3AlertEnabled: enabled });
 
     try {
       await this.prisma.executeWithRetry(() =>
         this.prisma.telegramUser.upsert({
           where: { chatId },
-          update: { tier2AlertEnabled: enabled },
-          create: { chatId, tier2AlertEnabled: enabled },
+          update: { tier2AlertEnabled: enabled, tier3AlertEnabled: enabled },
+          create: { chatId, tier2AlertEnabled: enabled, tier3AlertEnabled: enabled },
         }),
       );
-    } catch (e) {}
+    } catch (e) {
+      try {
+        await this.prisma.executeWithRetry(() =>
+          this.prisma.telegramUser.upsert({
+            where: { chatId },
+            update: { tier2AlertEnabled: enabled },
+            create: { chatId, tier2AlertEnabled: enabled },
+          }),
+        );
+      } catch (fallbackErr) {}
+    }
 
     return enabled;
   }
@@ -1338,13 +1348,23 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
    * Lấy danh sách tất cả ChatId người dùng có bật nhận cảnh báo tự động kèm bộ lọc Bias & Tier 0
    * TUYỆT ĐỐI KHÔNG GỬI NẾU NGƯỜI DÙNG ĐÃ TẮT CẢNH BÁO (bbAtrAlertEnabled = false)
    */
-  async getAllUsersForGlobalAlert(): Promise<Array<{ chatId: string; bias: BbAtrBias; tier0Enabled: boolean }>> {
+  async getAllUsersForGlobalAlert(): Promise<
+    Array<{
+      chatId: string;
+      bias: BbAtrBias;
+      tier0Enabled: boolean;
+      tier1Enabled: boolean;
+      tier2Enabled: boolean;
+    }>
+  > {
     try {
       let allUsers: Array<{
         chatId: string;
         bbAtrAlertEnabled: boolean;
         bbAtrBias: string;
         bbTier0AlertEnabled?: boolean;
+        tier1AlertEnabled?: boolean;
+        tier2SignalEnabled?: boolean;
       }> = [];
 
       const cachedUsers = this.subscriberCache?.isReady() ? this.subscriberCache.getAll() : null;
@@ -1354,38 +1374,63 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
         } else {
           allUsers = await this.prisma.executeWithRetry(() =>
             this.prisma.telegramUser.findMany({
-              select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true, bbTier0AlertEnabled: true },
+              select: {
+                chatId: true,
+                bbAtrAlertEnabled: true,
+                bbAtrBias: true,
+                bbTier0AlertEnabled: true,
+                tier1AlertEnabled: true,
+                tier2SignalEnabled: true,
+              },
             }),
           );
         }
       } catch (colErr) {
-        // Fallback an toàn nếu cột bbTier0AlertEnabled chưa được push lên DB production
-        allUsers = await this.prisma.executeWithRetry(() =>
-          this.prisma.telegramUser.findMany({
-            select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true },
-          }),
-        );
+        // Fallback an toàn nếu các cột Tier mới chưa được push lên DB production
+        try {
+          allUsers = await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true, bbTier0AlertEnabled: true },
+            }),
+          );
+        } catch (legacyErr) {
+          allUsers = await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: { chatId: true, bbAtrAlertEnabled: true, bbAtrBias: true },
+            }),
+          );
+        }
       }
 
       if (allUsers && allUsers.length > 0) {
         const knownDbChatIds = new Set(allUsers.map((u) => u.chatId));
-        const result: Array<{ chatId: string; bias: BbAtrBias; tier0Enabled: boolean }> = [];
+        const result: Array<{
+          chatId: string;
+          bias: BbAtrBias;
+          tier0Enabled: boolean;
+          tier1Enabled: boolean;
+          tier2Enabled: boolean;
+        }> = [];
 
         for (const u of allUsers) {
           // Trạng thái BẬT/TẮT: Kiểm tra cả Database và Fallback bộ nhớ
           // Nếu một trong hai là false thì TUYỆT ĐỐI KHÔNG GỬI
-          const isFallbackOff = this.userSettingFallback.get(u.chatId) === false;
+          const isFallbackOff = !cachedUsers && this.userSettingFallback.get(u.chatId) === false;
           const isDbOff = u.bbAtrAlertEnabled === false;
 
           if (!isDbOff && !isFallbackOff) {
-            const fbTier0 = this.userTier0Fallback.get(u.chatId);
-            const tier0Enabled = fbTier0 !== undefined ? fbTier0 : u.bbTier0AlertEnabled !== false;
+            const fbTier0 = !cachedUsers ? this.userTier0Fallback.get(u.chatId) : undefined;
+            const tier0Enabled = fbTier0 !== undefined ? fbTier0 : isTierEnabledForSubscriber(u, '0');
+            const tier1Enabled = isTierEnabledForSubscriber(u, '1');
+            const tier2Enabled = isTierEnabledForSubscriber(u, '2');
             result.push({
               chatId: u.chatId,
               bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
                 ? (u.bbAtrBias as BbAtrBias)
                 : this.userBiasFallback.get(u.chatId) || 'BOTH'),
               tier0Enabled,
+              tier1Enabled,
+              tier2Enabled,
             });
           }
         }
@@ -1398,6 +1443,8 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
                 chatId,
                 bias: this.userBiasFallback.get(chatId) || 'BOTH',
                 tier0Enabled: this.userTier0Fallback.get(chatId) ?? true,
+                tier1Enabled: true,
+                tier2Enabled: true,
               });
             }
           }
@@ -1410,13 +1457,21 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
     }
 
     // Fallback khi DB lỗi
-    const fallbackList: Array<{ chatId: string; bias: BbAtrBias; tier0Enabled: boolean }> = [];
+    const fallbackList: Array<{
+      chatId: string;
+      bias: BbAtrBias;
+      tier0Enabled: boolean;
+      tier1Enabled: boolean;
+      tier2Enabled: boolean;
+    }> = [];
     for (const chatId of this.activeChatIds) {
       if (this.userSettingFallback.get(chatId) === true) {
         fallbackList.push({
           chatId,
           bias: this.userBiasFallback.get(chatId) || 'BOTH',
           tier0Enabled: this.userTier0Fallback.get(chatId) ?? true,
+          tier1Enabled: true,
+          tier2Enabled: true,
         });
       }
     }
@@ -1424,30 +1479,42 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
   }
 
   /**
-   * Lấy danh sách ChatId người dùng có BẬT Cảnh báo Tier 2 - High Probability
-   * Yêu cầu: Kể cả user tắt cảnh báo BB, NWE hay SMC, chỉ cần user không tắt riêng Tier 2 thì vẫn gửi đến!
+   * Lấy danh sách ChatId người dùng có BẬT Cảnh báo Tier 3 VIP
+   * Yêu cầu: Kể cả user tắt cảnh báo BB, NWE hay SMC, chỉ cần user không tắt riêng Tier 3 thì vẫn gửi đến!
    */
   async getAllRegisteredUsersForTier2(): Promise<Array<{ chatId: string; bias: BbAtrBias }>> {
     const result: Array<{ chatId: string; bias: BbAtrBias }> = [];
     const knownDbChatIds = new Set<string>();
 
     try {
-      const allUsers: any[] = this.subscriberCache?.isReady()
-        ? this.subscriberCache.getAll()
-        : await this.prisma.executeWithRetry(() =>
+      const fromCache = Boolean(this.subscriberCache?.isReady());
+      let allUsers: any[];
+      if (fromCache) {
+        allUsers = this.subscriberCache!.getAll();
+      } else {
+        try {
+          allUsers = await this.prisma.executeWithRetry(() =>
+            this.prisma.telegramUser.findMany({
+              select: { chatId: true, bbAtrBias: true, tier3AlertEnabled: true, tier2AlertEnabled: true },
+            }),
+          );
+        } catch (colErr) {
+          allUsers = await this.prisma.executeWithRetry(() =>
             this.prisma.telegramUser.findMany({
               select: { chatId: true, bbAtrBias: true, tier2AlertEnabled: true },
             }),
           );
+        }
+      }
 
       if (allUsers && allUsers.length > 0) {
         for (const u of allUsers) {
           knownDbChatIds.add(u.chatId);
-          const isFallbackOff = this.userTier2Fallback.get(u.chatId) === false;
-          const isDbOff = u.tier2AlertEnabled === false;
+          const isFallbackOff = !fromCache && this.userTier2Fallback.get(u.chatId) === false;
+          const isTier3Enabled = isTierEnabledForSubscriber(u, '3');
 
-          // Nếu user chủ động tắt riêng Tier 2 thì loại trừ
-          if (!isDbOff && !isFallbackOff) {
+          // Nếu user chủ động tắt riêng Tier 3 thì loại trừ
+          if (isTier3Enabled && !isFallbackOff) {
             result.push({
               chatId: u.chatId,
               bias: (u.bbAtrBias && ['BOTH', 'BUY_ONLY', 'SELL_ONLY'].includes(u.bbAtrBias)
@@ -1652,13 +1719,15 @@ export class BbAtrService implements OnModuleInit, OnModuleDestroy {
 
         const alertMessage = this.renderAlertMessage(state, state.signal);
 
-        // Với Tier 0: bỏ qua user đã tắt riêng Tier 0 (nhưng vẫn giữ lại cho Tier 1, 2A, 2B, 3)
-        // Với Tier 0, 1, 2 (bao gồm Tier 2A & 2B): lọc theo Daily Trend Bias
-        const isTier0 = (state.alertTier || 0) === 0;
+        // Lọc theo từng Tier độc lập (Tier 0 / Tier 1 / Tier 2) và Daily Trend Bias
+        // Tier 3 đã được lọc độc lập qua getAllRegisteredUsersForTier2()
+        const alertTier = state.alertTier || 0;
         const eligibleChatIds = subscribers
           .filter((sub) => {
-            if (state.alertTier === 3) return true;
-            if (isTier0 && (sub as any).tier0Enabled === false) return false;
+            if (alertTier === 3) return true;
+            if (alertTier === 0 && (sub as any).tier0Enabled === false) return false;
+            if (alertTier === 1 && (sub as any).tier1Enabled === false) return false;
+            if (alertTier === 2 && (sub as any).tier2Enabled === false) return false;
             if (isSellSide && sub.bias === 'BUY_ONLY') return false;
             if (isBuySide && sub.bias === 'SELL_ONLY') return false;
             return true;

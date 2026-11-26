@@ -84,5 +84,8 @@ export interface UserSmcSettings {
   smcAlertEnabled: boolean;   // Bật/tắt cảnh báo Supply/Demand & Order Block
   smcTimeframes: SmcTimeframe[]; // Khung thời gian bật theo dõi Order Block
   timeframes: SmcTimeframe[]; // Khung thời gian fallback chung
-  tier2AlertEnabled?: boolean; // Bật/tắt riêng cảnh báo Tier 2 (Quét thanh khoản)
+  tier1AlertEnabled?: boolean;   // Bật/tắt cảnh báo Tier 1 (đơn khung)
+  tier2SignalEnabled?: boolean;  // Bật/tắt cảnh báo Tier 2 (hợp lưu MTF)
+  tier3AlertEnabled?: boolean;   // Bật/tắt cảnh báo Tier 3 VIP
+  tier2AlertEnabled?: boolean;   // Cột cũ tương thích ngược cho Tier 3 VIP
 }
